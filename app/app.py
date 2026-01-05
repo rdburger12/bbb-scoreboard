@@ -1,48 +1,51 @@
-from __future__ import annotations
-
 import subprocess
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-st.title("BBB Playoff Scoreboard")
+# Anchor everything to repo root regardless of how Streamlit is launched
+ROOT = Path(__file__).resolve().parents[1]  # bbb_scoreboard/
+R_SCRIPT = ROOT / "r" / "refresh_pbp.R"
 
-out_path = Path("data/processed/scoring_plays.csv")
+SCORING = ROOT / "data" / "processed" / "scoring_plays.csv"
+LATEST = ROOT / "data" / "processed" / "scoring_plays_latest.csv"
+STATUS = ROOT / "data" / "processed" / "refresh_status.csv"
+LOG = ROOT / "data" / "processed" / "refresh_log.csv"
 
-game_ids_str = st.text_input(
-    "Game IDs (space-separated)",
-    value="",
-    help="Example: 2024010100 2024010101 (use NFL.com game ids you plan to refresh)",
-)
+st.title("BBB Scoreboard - Incremental Loading Test")
 
-cols = st.columns([1, 3])
-with cols[0]:
-    refresh = st.button("Refresh Data", type="primary")
+season = st.number_input("Season", value=2025, step=1)
+week = st.number_input("Week", value=18, step=1)
 
-with cols[1]:
-    st.caption("Refresh runs an R script (nflfastR) and writes data/processed/scoring_plays.csv")
-
-if refresh:
-    game_ids = [x.strip() for x in game_ids_str.split() if x.strip()]
-    if not game_ids:
-        st.error("Enter at least one game id.")
-        st.stop()
-
-    cmd = ["Rscript", "r/refresh_pbp.R", *game_ids]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-
+if st.button("Refresh Data", type="primary"):
+    res = subprocess.run(
+        ["Rscript", str(R_SCRIPT), "--season", str(season), "--week", str(week)],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+    )
     if res.returncode != 0:
         st.error("Refresh failed")
         st.code(res.stderr)
     else:
         st.success("Refresh complete")
-        if res.stdout:
+        if res.stdout.strip():
             st.code(res.stdout)
 
-if out_path.exists():
-    st.subheader("Scoring plays (latest refresh)")
-    df = pd.read_csv(out_path)
-    st.dataframe(df, use_container_width=True)
+st.subheader("Refresh status (latest)")
+if STATUS.exists():
+    st.dataframe(pd.read_csv(STATUS), use_container_width=True)
 else:
-    st.info("No scoring plays file yet. Click Refresh Data.")
+    st.info("No refresh_status.csv yet. Click Refresh Data.")
+
+st.subheader("Refresh log (last 20 attempts)")
+if LOG.exists():
+    df_log = pd.read_csv(LOG)
+    st.dataframe(df_log.tail(20), use_container_width=True)
+else:
+    st.info("No refresh_log.csv yet. Click Refresh Data.")
+
+st.subheader("Latest refresh scoring plays")
+if LATEST.exists():
+    df_latest = pd.read_csv(LATEST)
