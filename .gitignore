@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# Data artifacts (keep raw + processed out of git)
+data/raw/
+data/processed/
+
+# OS/editor noise
+.DS_Store
+.vscode/
