@@ -1,48 +1,102 @@
-from __future__ import annotations
-
 import subprocess
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-st.title("BBB Playoff Scoreboard")
+# Anchor everything to repo root regardless of how Streamlit is launched
+ROOT = Path(__file__).resolve().parents[1]  # bbb_scoreboard/
+R_SCRIPT = ROOT / "r" / "refresh_pbp.R"
 
-out_path = Path("data/processed/scoring_plays.csv")
+PROCESSED = ROOT / "data" / "processed"
+SCORING = PROCESSED / "scoring_plays.csv"
+LATEST = PROCESSED / "scoring_plays_latest.csv"
+STATUS = PROCESSED / "refresh_status.csv"
+LOG = PROCESSED / "refresh_log.csv"
 
-game_ids_str = st.text_input(
-    "Game IDs (space-separated)",
-    value="",
-    help="Example: 2024010100 2024010101 (use NFL.com game ids you plan to refresh)",
-)
 
-cols = st.columns([1, 3])
-with cols[0]:
-    refresh = st.button("Refresh Data", type="primary")
+def read_csv_safe(path: Path) -> pd.DataFrame:
+    """Read CSV safely; return empty DF if missing/empty/unreadable."""
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        # keep_default_na=False avoids pandas converting empty strings to NaN in some cases
+        return pd.read_csv(path, keep_default_na=True)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+    except Exception as e:
+        st.warning(f"Could not read {path.name}: {e}")
+        return pd.DataFrame()
 
-with cols[1]:
-    st.caption("Refresh runs an R script (nflfastR) and writes data/processed/scoring_plays.csv")
 
-if refresh:
-    game_ids = [x.strip() for x in game_ids_str.split() if x.strip()]
-    if not game_ids:
-        st.error("Enter at least one game id.")
-        st.stop()
+st.title("BBB Scoreboard - Incremental Loading Test")
 
-    cmd = ["Rscript", "r/refresh_pbp.R", *game_ids]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+season = st.number_input("Season", value=2025, step=1)
+week = st.number_input("Week", value=18, step=1)
+
+refresh_clicked = st.button("Refresh Data", type="primary")
+
+if refresh_clicked:
+    with st.spinner("Refreshing data (running Rscript)..."):
+        res = subprocess.run(
+            ["Rscript", str(R_SCRIPT), "--season", str(season), "--week", str(week)],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+        )
 
     if res.returncode != 0:
         st.error("Refresh failed")
-        st.code(res.stderr)
+        if res.stdout.strip():
+            st.subheader("stdout")
+            st.code(res.stdout)
+        if res.stderr.strip():
+            st.subheader("stderr")
+            st.code(res.stderr)
     else:
         st.success("Refresh complete")
-        if res.stdout:
+        if res.stdout.strip():
+            st.subheader("R output")
             st.code(res.stdout)
+        # nflfastR/future may emit warnings to stderr even on success
+        if res.stderr.strip():
+            st.subheader("R warnings (stderr)")
+            st.code(res.stderr)
 
-if out_path.exists():
-    st.subheader("Scoring plays (latest refresh)")
-    df = pd.read_csv(out_path)
-    st.dataframe(df, use_container_width=True)
+
+st.subheader("Refresh status (latest)")
+df_status = read_csv_safe(STATUS)
+if df_status.empty:
+    st.info("No refresh_status.csv yet. Click Refresh Data.")
 else:
-    st.info("No scoring plays file yet. Click Refresh Data.")
+    # Nice-to-have: show last refresh timestamp prominently if present
+    if "refreshed_at" in df_status.columns and len(df_status) == 1:
+        st.caption(f"Last refresh: {df_status.loc[0, 'refreshed_at']}")
+    st.dataframe(df_status, use_container_width=True)
+
+st.subheader("Refresh log (last 20 attempts)")
+df_log = read_csv_safe(LOG)
+if df_log.empty:
+    st.info("No refresh_log.csv yet. Click Refresh Data.")
+else:
+    st.dataframe(df_log.tail(20), use_container_width=True)
+
+st.subheader("Latest refresh scoring plays")
+df_latest = read_csv_safe(LATEST)
+if df_latest.empty:
+    st.info("No latest file yet, or latest refresh returned 0 scoring plays.")
+else:
+    st.write(f"Rows: {len(df_latest)}")
+    st.dataframe(df_latest.head(50), use_container_width=True)
+
+st.subheader("Cumulative scoring plays (upserted)")
+df_scoring = read_csv_safe(SCORING)
+if df_scoring.empty:
+    st.info("No cumulative scoring file yet.")
+else:
+    if {"game_id", "play_id"}.issubset(df_scoring.columns):
+        unique_keys = df_scoring[["game_id", "play_id"]].drop_duplicates().shape[0]
+        st.write(f"Rows: {len(df_scoring)} | Unique keys: {unique_keys}")
+    else:
+        st.write(f"Rows: {len(df_scoring)}")
+    st.dataframe(df_scoring.tail(50), use_container_width=True)
