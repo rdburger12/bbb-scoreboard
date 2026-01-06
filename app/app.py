@@ -7,30 +7,41 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 # -----------------------------------------------------
 
+import os
+import subprocess
+
+import pandas as pd
+import streamlit as st
+from dotenv import load_dotenv
+
 # -------------------------
 # Global configuration
 # -------------------------
-BBB_SEASON = 2024  # change once per year
+load_dotenv(ROOT / ".env")
+BBB_SEASON = int(os.environ["BBB_SEASON"])
 
-import subprocess
-import pandas as pd
-import streamlit as st
-
+# -------------------------
+# App imports
+# -------------------------
 from src.gameset import GameSet, load_game_ids
 from src.scoring import load_player_positions, score_team_position_totals
 
-
-# Anchor everything to repo root regardless of how Streamlit is launched
+# -------------------------
+# Paths
+# -------------------------
 R_SCRIPT = ROOT / "r" / "refresh_pbp.R"
 
+CONFIG = ROOT / "data" / "config"
 PROCESSED = ROOT / "data" / "processed"
+
 SCORING = PROCESSED / "scoring_plays.csv"
 LATEST = PROCESSED / "scoring_plays_latest.csv"
 STATUS = PROCESSED / "refresh_status.csv"
 LOG = PROCESSED / "refresh_log.csv"
-PLAYOFF_GAMES = PROCESSED / f"playoff_game_ids_{BBB_SEASON}.csv"
-pos_cache = PROCESSED / f"player_positions_{BBB_SEASON}.csv"
-DRAFT_PICKS = ROOT / "data" / "config" / "draft_picks.csv"
+
+PLAYOFF_GAMES = CONFIG / f"playoff_game_ids_{BBB_SEASON}.csv"
+DRAFT_PICKS = CONFIG / "draft_picks.csv"
+POS_CACHE = PROCESSED / f"player_positions_{BBB_SEASON}.csv"
 
 if not DRAFT_PICKS.exists():
     st.error("Missing draft_picks.csv. Run scripts/transform_draft_csv.py.")
