@@ -1,86 +1,180 @@
 # r/lib/scoring_plays.R
+# Derive scoring plays for BBB Scoreboard from nflfastR pbp.
+# This is intentionally small and deterministic to match Calculate BBB Points.R.
+
+suppressPackageStartupMessages({
+  library(dplyr)
+})
+
+# Safe column access: returns df[[name]] if present else default vector (must be length nrow(df))
 col_or <- function(df, name, default) {
   if (name %in% names(df)) df[[name]] else default
 }
 
-derive_scoring_plays <- function(pbp, refreshed_at, season, week) {
-  pbp2 <- pbp %>%
-    dplyr::mutate(
-      touchdown = col_or(., "touchdown", rep(0L, dplyr::n())),
-      safety = col_or(., "safety", rep(0L, dplyr::n())),
-      field_goal_result = col_or(
-        .,
-        "field_goal_result",
-        rep(NA_character_, dplyr::n())
-      ),
-      extra_point_result = col_or(
-        .,
-        "extra_point_result",
-        rep(NA_character_, dplyr::n())
-      ),
-      two_point_conv_result = col_or(
-        .,
-        "two_point_conv_result",
-        rep(NA_character_, dplyr::n())
-      ),
+# Normalize string-ish vectors (safe for NA)
+as_chr <- function(x) {
+  x <- ifelse(is.na(x), NA_character_, as.character(x))
+  x
+}
 
-      is_td = !is.na(touchdown) & touchdown == 1,
-      is_fg = !is.na(field_goal_result) & tolower(field_goal_result) == "made",
-      is_xp = !is.na(extra_point_result) &
-        tolower(extra_point_result) %in% c("good", "made"),
+# Normalize integer-ish vectors (safe for NA)
+as_int <- function(x) {
+  suppressWarnings(as.integer(x))
+}
 
-      # Offensive 2pt success
-      is_2pt_off = !is.na(two_point_conv_result) &
-        tolower(two_point_conv_result) %in% c("success", "good"),
+# Normalize logical-ish vectors (safe for NA; treats 1 as TRUE)
+as_lgl <- function(x) {
+  if (is.logical(x)) {
+    return(ifelse(is.na(x), FALSE, x))
+  }
+  if (is.numeric(x) || is.integer(x)) {
+    return(ifelse(is.na(x), FALSE, x == 1))
+  }
+  # fallback: strings
+  x2 <- tolower(ifelse(is.na(x), "", as.character(x)))
+  x2 %in% c("1", "true", "t", "yes")
+}
 
-      desc_l = tolower(col_or(., "desc", rep("", n()))),
+#' derive_scoring_plays
+#'
+#' @param pbp nflfastR play-by-play data.frame/tibble (from fast_scraper / load_pbp etc.)
+#' @param refreshed_at character timestamp to stamp output rows (optional)
+#' @param season integer season (optional; will pull from pbp if present)
+#' @param week_default integer fallback week if pbp lacks week column (optional)
+#'
+#' @return tibble of scoring plays with canonical BBB flags
+derive_scoring_plays <- function(
+  pbp,
+  refreshed_at = as.character(Sys.time()),
+  season = NA_integer_,
+  week_default = NA_integer_
+) {
+  if (is.null(pbp) || nrow(pbp) == 0) {
+    return(tibble::tibble())
+  }
 
-      is_xp_good = !is.na(extra_point_result) &
-        tolower(extra_point_result) %in% c("good", "made"),
+  n <- nrow(pbp)
 
-      # Blocked XP returned by defense for 2 (rare). Often encoded as XP attempt, not two_point_conv_result.
-      is_pat_def_2pt = stringr::str_detect(desc_l, "extra point") &
-        stringr::str_detect(desc_l, "blocked") &
-        stringr::str_detect(desc_l, "return") &
-        stringr::str_detect(desc_l, "two"),
+  # Pull raw columns (or defaults) once
+  touchdown <- as_int(col_or(pbp, "touchdown", rep(0L, n)))
+  safety <- as_int(col_or(pbp, "safety", rep(0L, n)))
 
-      is_xp = is_xp_good,
+  field_goal_result <- as_chr(col_or(
+    pbp,
+    "field_goal_result",
+    rep(NA_character_, n)
+  ))
+  extra_point_result <- as_chr(col_or(
+    pbp,
+    "extra_point_result",
+    rep(NA_character_, n)
+  ))
+  two_point_conv_result <- as_chr(col_or(
+    pbp,
+    "two_point_conv_result",
+    rep(NA_character_, n)
+  ))
 
-      # Defensive 2pt return (rare): not always labeled as success/good and may not set touchdown==1
-      is_def_2pt_return = !is.na(two_point_conv_result) &
-        (tolower(two_point_conv_result) %in%
-          c("return", "returned") |
-          stringr::str_detect(
-            desc_l,
-            "two[- ]point.*return|return.*two[- ]point|defensive two[- ]point"
-          )),
+  pass_touchdown <- as_lgl(col_or(pbp, "pass_touchdown", rep(FALSE, n)))
+  rush_touchdown <- as_lgl(col_or(pbp, "rush_touchdown", rep(FALSE, n)))
 
-      is_2pt = is_2pt_off | is_def_2pt_return,
+  # nflfastR canonical flag for “defensive two-point conversion”
+  # This includes blocked XP returned for 2 and defensive returns on 2pt tries.
+  defensive_two_point_conv <- as_int(col_or(
+    pbp,
+    "defensive_two_point_conv",
+    rep(0L, n)
+  ))
 
-      is_safety = !is.na(safety) & safety == 1,
-      is_scoring_play = is_td |
-        is_fg |
-        is_xp |
-        is_2pt |
-        is_safety |
-        is_pat_def_2pt
-    )
+  # Canonical scoring booleans
+  is_td <- touchdown == 1
+  is_fg <- !is.na(field_goal_result) & tolower(field_goal_result) == "made"
+  is_xp <- !is.na(extra_point_result) &
+    tolower(extra_point_result) %in% c("good", "made")
 
-  pbp2 %>%
-    dplyr::filter(is_scoring_play) %>%
-    dplyr::transmute(
+  # Offensive 2pt success (your old R logic uses success)
+  # We allow "good" as well, but it is rare and harmless.
+  is_2pt_off <- !is.na(two_point_conv_result) &
+    tolower(two_point_conv_result) %in% c("success", "good")
+
+  # Defensive 2pt (authoritative)
+  is_def_two_pt <- !is.na(defensive_two_point_conv) &
+    defensive_two_point_conv == 1
+
+  # Safety (authoritative)
+  is_safety <- !is.na(safety) & safety == 1
+
+  # TD attribution splits (authoritative)
+  is_td_off <- is_td & (pass_touchdown | rush_touchdown)
+  is_td_def <- is_td & !is_td_off
+
+  # “Scoring play” inclusion for storage
+  # - includes defensive two-point conversions even if not marked as “2pt success”
+  is_scoring_play <- is_td |
+    is_fg |
+    is_xp |
+    is_2pt_off |
+    is_safety |
+    is_def_two_pt
+
+  # Build output
+  out <- pbp %>%
+    mutate(
       refreshed_at = refreshed_at,
-      season = season,
-      week = col_or(., "week", rep(week, dplyr::n())),
-      game_id = game_id,
-      game_date = col_or(., "game_date", rep(NA_character_, dplyr::n())),
-      posteam = col_or(., "posteam", rep(NA_character_, dplyr::n())),
-      defteam = col_or(., "defteam", rep(NA_character_, dplyr::n())),
-      qtr = col_or(., "qtr", rep(NA_integer_, dplyr::n())),
-      time = col_or(., "time", rep(NA_character_, dplyr::n())),
-      drive = col_or(., "drive", rep(NA_integer_, dplyr::n())),
-      play_id = play_id,
-      desc = col_or(., "desc", rep(NA_character_, dplyr::n())),
+
+      # Fill season/week if missing in pbp
+      season = if ("season" %in% names(pbp)) {
+        as_int(.data$season)
+      } else {
+        as_int(rep(season, n))
+      },
+      week = if ("week" %in% names(pbp)) {
+        as_int(.data$week)
+      } else {
+        as_int(rep(week_default, n))
+      },
+
+      touchdown = touchdown,
+      safety = safety,
+      field_goal_result = field_goal_result,
+      extra_point_result = extra_point_result,
+      two_point_conv_result = two_point_conv_result,
+
+      pass_touchdown = pass_touchdown,
+      rush_touchdown = rush_touchdown,
+      defensive_two_point_conv = defensive_two_point_conv,
+
+      is_td = is_td,
+      is_fg = is_fg,
+      is_xp = is_xp,
+      is_2pt = is_2pt_off, # keep name consistent with your CSV schema
+      is_safety = is_safety,
+
+      is_def_two_pt = is_def_two_pt,
+      is_td_off = is_td_off,
+      is_td_def = is_td_def,
+
+      is_scoring_play = is_scoring_play
+    ) %>%
+    filter(.data$is_scoring_play) %>%
+    transmute(
+      refreshed_at,
+
+      season,
+      week,
+
+      game_id = as_chr(col_or(., "game_id", rep(NA_character_, n()))),
+      game_date = as_chr(col_or(., "game_date", rep(NA_character_, n()))),
+
+      posteam = as_chr(col_or(., "posteam", rep(NA_character_, n()))),
+      defteam = as_chr(col_or(., "defteam", rep(NA_character_, n()))),
+
+      qtr = as_int(col_or(., "qtr", rep(NA_integer_, n()))),
+      time = as_chr(col_or(., "time", rep(NA_character_, n()))),
+      drive = as_int(col_or(., "drive", rep(NA_integer_, n()))),
+
+      play_id = as_int(col_or(., "play_id", rep(NA_integer_, n()))),
+      desc = as_chr(col_or(., "desc", rep(NA_character_, n()))),
 
       touchdown,
       field_goal_result,
@@ -88,61 +182,77 @@ derive_scoring_plays <- function(pbp, refreshed_at, season, week) {
       two_point_conv_result,
       safety,
 
+      # Base flags used by Python
       is_td,
       is_fg,
       is_xp,
       is_2pt,
       is_safety,
-      is_def_2pt_return = col_or(., "is_def_2pt_return", rep(FALSE, n())),
-      is_pat_def_2pt = col_or(., "is_pat_def_2pt", rep(FALSE, n())),
-      play_type = col_or(., "play_type", rep(NA_character_, dplyr::n())),
-      pass = col_or(., "pass", rep(NA_integer_, dplyr::n())),
-      rush = col_or(., "rush", rep(NA_integer_, dplyr::n())),
-      qb_dropback = col_or(., "qb_dropback", rep(NA_integer_, dplyr::n())),
-      sack = col_or(., "sack", rep(NA_integer_, dplyr::n())),
-      interception = col_or(., "interception", rep(NA_integer_, dplyr::n())),
-      fumble_lost = col_or(., "fumble_lost", rep(NA_integer_, dplyr::n())),
-      return_team = col_or(., "return_team", rep(NA_character_, dplyr::n())),
 
-      passer_player_id = col_or(
+      # Authoritative attribution flags (used to avoid heuristic mistakes)
+      pass_touchdown,
+      rush_touchdown,
+      is_td_off,
+      is_td_def,
+
+      defensive_two_point_conv,
+      is_def_two_pt,
+
+      # Context columns (kept because they are useful for UI/diagnostics)
+      play_type = as_chr(col_or(., "play_type", rep(NA_character_, n()))),
+      pass = as_int(col_or(., "pass", rep(NA_integer_, n()))),
+      rush = as_int(col_or(., "rush", rep(NA_integer_, n()))),
+      qb_dropback = as_int(col_or(., "qb_dropback", rep(NA_integer_, n()))),
+      sack = as_int(col_or(., "sack", rep(NA_integer_, n()))),
+      interception = as_int(col_or(., "interception", rep(NA_integer_, n()))),
+      fumble_lost = as_int(col_or(., "fumble_lost", rep(NA_integer_, n()))),
+
+      return_team = as_chr(col_or(., "return_team", rep(NA_character_, n()))),
+
+      passer_player_id = as_chr(col_or(
         .,
         "passer_player_id",
-        rep(NA_character_, dplyr::n())
-      ),
-      passer_player_name = col_or(
+        rep(NA_character_, n())
+      )),
+      passer_player_name = as_chr(col_or(
         .,
         "passer_player_name",
-        rep(NA_character_, dplyr::n())
-      ),
-      receiver_player_id = col_or(
+        rep(NA_character_, n())
+      )),
+
+      receiver_player_id = as_chr(col_or(
         .,
         "receiver_player_id",
-        rep(NA_character_, dplyr::n())
-      ),
-      receiver_player_name = col_or(
+        rep(NA_character_, n())
+      )),
+      receiver_player_name = as_chr(col_or(
         .,
         "receiver_player_name",
-        rep(NA_character_, dplyr::n())
-      ),
-      rusher_player_id = col_or(
+        rep(NA_character_, n())
+      )),
+
+      rusher_player_id = as_chr(col_or(
         .,
         "rusher_player_id",
-        rep(NA_character_, dplyr::n())
-      ),
-      rusher_player_name = col_or(
+        rep(NA_character_, n())
+      )),
+      rusher_player_name = as_chr(col_or(
         .,
         "rusher_player_name",
-        rep(NA_character_, dplyr::n())
-      ),
-      kicker_player_id = col_or(
+        rep(NA_character_, n())
+      )),
+
+      kicker_player_id = as_chr(col_or(
         .,
         "kicker_player_id",
-        rep(NA_character_, dplyr::n())
-      ),
-      kicker_player_name = col_or(
+        rep(NA_character_, n())
+      )),
+      kicker_player_name = as_chr(col_or(
         .,
         "kicker_player_name",
-        rep(NA_character_, dplyr::n())
-      )
+        rep(NA_character_, n())
+      ))
     )
+
+  out
 }

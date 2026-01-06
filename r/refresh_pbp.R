@@ -181,7 +181,12 @@ pbp_rows <- nrow(pbp)
 # Derive scoring plays
 # -------------------------
 t_transform0 <- Sys.time()
-new_scoring <- derive_scoring_plays(pbp, refreshed_at, season, week)
+new_scoring <- derive_scoring_plays(
+  pbp,
+  refreshed_at = refreshed_at,
+  season = season,
+  week_default = week
+)
 t_transform_s <- as.numeric(difftime(Sys.time(), t_transform0, units = "secs"))
 
 scoring_plays_this_refresh <- nrow(new_scoring)
