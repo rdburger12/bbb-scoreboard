@@ -28,10 +28,6 @@ from src.ui_sections import (
     section_scoreboard_round_grid
 )
 
-
-
-
-
 # -------------------------
 # Global configuration
 # -------------------------
@@ -42,7 +38,6 @@ st.set_page_config(
     layout="wide",
     page_title="BBB Scoreboard",
 )
-
 
 # -------------------------
 # Paths
@@ -76,27 +71,37 @@ DEFAULT_TZ = "America/Chicago"  # fallback if detection fails
 def load_positions(cache_path: Path) -> pd.DataFrame:
     return load_player_positions(cache_path)
 
+# --- Toast + layout CSS (inject once) ---
 st.markdown(
     """
     <style>
+    /* Tighten overall page top padding */
+    section.main > div {
+        padding-top: 0.5rem !important;
+    }
+
+    /* Reduce space above the main title */
+    h1 {
+        margin-top: 0.25rem !important;
+        margin-bottom: 0.75rem !important;
+    }
+
     .bbb-toast-wrap {
-        position: fixed;
-        top: 18px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 999999;
-        pointer-events: none; /* don't block clicks */
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
     }
     .bbb-toast {
-        min-width: 360px;
-        max-width: 760px;
+        width: 100%;
+        max-width: 560px;
         padding: 10px 14px;
         border-radius: 10px;
         border: 1px solid rgba(49, 51, 63, 0.25);
         background: rgba(20, 20, 20, 0.92);
         color: white;
         font-weight: 650;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.20);
         opacity: 0;
         animation: bbbFadeInOut 6s ease-in-out forwards;
         text-align: center;
@@ -107,51 +112,17 @@ st.markdown(
     .bbb-toast.error   { background: rgba(185, 28, 28, 0.95); }
 
     @keyframes bbbFadeInOut {
-        0%   { opacity: 0; transform: translateY(-8px); }
+        0%   { opacity: 0; transform: translateY(-6px); }
         8%   { opacity: 1; transform: translateY(0); }
         85%  { opacity: 1; transform: translateY(0); }
-        100% { opacity: 0; transform: translateY(-8px); }
+        100% { opacity: 0; transform: translateY(-6px); }
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-
-def bbb_toast(message: str, *, level: str = "info") -> None:
-    """
-    level: info|success|warning|error
-    """
-    st.session_state["bbb_toast_n"] = st.session_state.get("bbb_toast_n", 0) + 1
-    n = st.session_state["bbb_toast_n"]
-
-    st.markdown(
-        f"""
-        <div class="bbb-toast-wrap">
-          <div class="bbb-toast {level}" id="bbb-toast-{n}">
-            {message}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def render_pending_toast() -> None:
-    """
-    If a toast was queued before st.rerun(), render it once on the next run.
-    """
-    pending = st.session_state.pop("bbb_pending_toast", None)
-    if not pending:
-        return
-    msg, level = pending
-    bbb_toast(msg, level=level)
-
-
 def queue_toast(message: str, *, level: str = "info") -> None:
-    """
-    Queue a toast to be shown after st.rerun().
-    """
     st.session_state["bbb_pending_toast"] = (message, level)
 
 
@@ -250,68 +221,111 @@ playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
 # -------------------------
 # UI: Header + controls
 # -------------------------
-render_pending_toast()
-
-left, right = st.columns([7, 3], vertical_alignment="top")
-with left:
-    st.title("Big Burger Bet")
-
 sub_text = (
     f"Last refreshed at {formatted_refresh_at}"
     if formatted_refresh_at
     else "Press button to populate scores"
 )
 
-with right:
-    if st.button("Refresh Scores", type="primary", key="refresh_scores"):
-        result = None
+topbar = st.container()
+with topbar:
+    left, mid, right = st.columns([4, 6, 4], vertical_alignment="center")
 
-        # Make the refresh feel responsive
-        with st.spinner("Refreshing scores…"):
-            try:
-                result = refresh_playoff_games(
-                    season=BBB_SEASON,
-                    playoff_game_ids=playoff_game_ids,
-                    cumulative_out_path=SCORING_PLAYS_PATH,
-                    metrics_out_path=REFRESH_METRICS,
-                    state_path=REFRESH_STATE,
-                    lock_path=REFRESH_LOCK,
-                    inactive_seconds=60 * 60,
-                )
-            except RefreshInProgress:
-                bbb_toast(
-                    "Refresh already in progress. Try again in a moment.",
-                    level="warning",
-                )
+    with left:
+        st.markdown(
+            "<h1 style='margin:0; padding:0; line-height:1.05;'>BBB Scoreboard</h1>",
+            unsafe_allow_html=True,
+        )
+
+    with mid:
+        TOAST_SLOT = st.empty()
+
+        def bbb_toast(message: str, *, level: str = "info") -> None:
+            st.session_state["bbb_toast_n"] = st.session_state.get("bbb_toast_n", 0) + 1
+            n = st.session_state["bbb_toast_n"]
+
+            TOAST_SLOT.markdown(
+                f"""
+                <div class="bbb-toast-wrap">
+                  <div class="bbb-toast {level}" id="bbb-toast-{n}">
+                    {message}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # Render any pending toast queued before st.rerun()
+        pending = st.session_state.pop("bbb_pending_toast", None)
+        if pending:
+            msg, level = pending
+            bbb_toast(msg, level=level)
+        else:
+            # keep the slot height-neutral when empty
+            TOAST_SLOT.markdown("<div style='height:0'></div>", unsafe_allow_html=True)
+
+    with right:
+        st.markdown("<div style='padding-top:4px;'></div>", unsafe_allow_html=True)
+        # Nested columns to force right alignment
+        spacer, btn_col = st.columns([3, 2])
+
+        with btn_col:
+            if st.button("Refresh Scores", type="primary", key="refresh_scores"):
                 result = None
-            except Exception as e:
-                bbb_toast(f"Refresh failed: {e}", level="error")
-                result = None
 
-        # If the refresh actually ran, always rerun so cached reads can't trap us.
-        if result is not None:
-            if not result.ok:
-                bbb_toast(result.message, level="error")
-            else:
-                # Choose message
-                if getattr(result, "eligible_games", 0) == 0:
-                    queue_toast(
-                        "Nothing to refresh - scoreboard reflects final scores",
-                        level="info",
-                    )
-                elif getattr(result, "changed", False) is False:
-                    queue_toast(
-                        "Up to date — no new scoring plays found.",
-                        level="info",
-                    )
-                else:
-                    queue_toast("Scores updated", level="success")
+                with st.spinner("Refreshing scores…"):
+                    try:
+                        result = refresh_playoff_games(
+                            season=BBB_SEASON,
+                            playoff_game_ids=playoff_game_ids,
+                            cumulative_out_path=SCORING_PLAYS_PATH,
+                            metrics_out_path=REFRESH_METRICS,
+                            state_path=REFRESH_STATE,
+                            lock_path=REFRESH_LOCK,
+                            inactive_seconds=60 * 60,
+                        )
+                    except RefreshInProgress:
+                        bbb_toast(
+                            "Refresh already in progress. Try again in a moment.",
+                            level="warning",
+                        )
+                        result = None
+                    except Exception as e:
+                        bbb_toast(f"Refresh failed: {e}", level="error")
+                        result = None
 
-                # Critical: reload data from disk
-                st.cache_data.clear()
-                st.rerun()
+                if result is not None:
+                    if not result.ok:
+                        bbb_toast(result.message, level="error")
+                    else:
+                        if result.eligible_games == 0:
+                            queue_toast(
+                                "Nothing to refresh - scoreboard reflects final scores",
+                                level="info",
+                            )
+                        elif result.changed is False:
+                            queue_toast(
+                                "Up to date — no new scoring plays found.",
+                                level="info",
+                            )
+                        else:
+                            queue_toast("Scores updated", level="success")
 
-    st.caption(sub_text)
+                        st.cache_data.clear()
+                        st.rerun()
+
+            # Right-aligned caption under the button
+            st.markdown(
+    f"""
+    <div style='text-align:right;
+                font-size:0.85rem;
+                opacity:0.75;
+                white-space:nowrap;'>
+        {sub_text}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # -------------------------
@@ -353,7 +367,6 @@ if df_scoring.empty:
             season=BBB_SEASON,
             validate=True,
         )
-        section_scoreboard_round_grid(scoreboard)
 
     section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
@@ -381,6 +394,7 @@ if not POS_CACHE.exists():
     st.stop()
 
 positions = load_positions(POS_CACHE)
+
 
 # -------------------------
 # Compute totals + events
@@ -415,5 +429,7 @@ if not draft_df.empty:
         validate=True,
     )
     section_scoreboard_round_grid(scoreboard)
+
+st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
 section_event_feed(events, draft_df=draft_df, team_filter=True)
