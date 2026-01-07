@@ -25,7 +25,6 @@ from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
     section_event_feed,
     section_totals_tieout,
-    section_playoff_scoping_diag,
     section_scoreboard_round_grid
 )
 
@@ -173,9 +172,9 @@ playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
 # -------------------------
 # UI: Header + controls
 # -------------------------
+st.title(f"Big Burger Bet {BBB_SEASON}")
 left, right = st.columns([7, 3], vertical_alignment="top")
-with left:
-    st.title(f"Big Burger Bet {BBB_SEASON}")
+
 
 sub_text = (
     f"Last refreshed at {formatted_refresh_at}"
@@ -267,12 +266,6 @@ else:
 
 # --- UI ---
 section_scoreboard_round_grid(scoreboard)
-
-section_playoff_scoping_diag(
-    playoff_games_path=PLAYOFF_GAMES,
-    playoff_game_ids=playoff_game_ids,
-    df_scoring=df_scoring,
-)
 
 section_event_feed(events, team_filter=True)
 

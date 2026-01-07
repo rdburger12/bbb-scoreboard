@@ -68,18 +68,6 @@ def section_totals_tieout(totals: pd.DataFrame, events: pd.DataFrame) -> None:
             st.dataframe(bad, use_container_width=True)
 
 
-def section_playoff_scoping_diag(
-    *,
-    playoff_games_path: Path,
-    playoff_game_ids: set[str],
-    df_scoring: pd.DataFrame,
-) -> None:
-    with st.expander("Diagnostics: playoff scoping", expanded=False):
-        st.write("playoff_game_ids file:", playoff_games_path)
-        st.write("playoff_game_ids count:", len(playoff_game_ids))
-        if not df_scoring.empty and "game_id" in df_scoring.columns:
-            st.write("games in scoring_plays.csv:", int(df_scoring["game_id"].nunique()))
-
 def section_scoreboard_table(scoreboard: pd.DataFrame) -> None:
     st.subheader("Scoreboard (Owners × Drafted Units)")
     if scoreboard.empty:
