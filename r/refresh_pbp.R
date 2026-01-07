@@ -31,11 +31,18 @@ get_flag_value <- function(flag) {
   args[idx[1] + 1]
 }
 
-week <- as.integer(get_flag_value("--week"))
-out_path <- get_flag_value("--out")
+game_ids_arg <- get_flag_value("--game_ids")
+metrics_out <- get_flag_value("--metrics_out")
 
-if (is.na(week)) {
-  stop("Usage: Rscript r/refresh_pbp.R --week <WEEK> [--out <PATH>]")
+week <- as.integer(get_flag_value("--week"))
+game_ids_arg <- get_flag_value("--game_ids")
+out_path <- get_flag_value("--out")
+metrics_out <- get_flag_value("--metrics_out")
+
+if (is.na(week) && (is.na(game_ids_arg) || game_ids_arg == "")) {
+  stop(
+    "Usage: Rscript r/refresh_pbp.R (--week <WEEK> | --game_ids <id1,id2,...>) [--out <PATH>] [--metrics_out <PATH>]"
+  )
 }
 
 # -------------------------
@@ -65,11 +72,20 @@ cat("Output:", paths$out_path, "\n")
 # Resolve game_ids
 # -------------------------
 t_schedule0 <- Sys.time()
-game_ids <- resolve_game_ids_for_week(season, week)
-games_requested <- length(game_ids)
-t_schedule_s <- as.numeric(difftime(Sys.time(), t_schedule0, units = "secs"))
 
-cat("Resolved game_ids:", games_requested, "\n")
+if (!is.na(game_ids_arg) && game_ids_arg != "") {
+  game_ids <- strsplit(game_ids_arg, ",")[[1]]
+  game_ids <- stringr::str_trim(game_ids)
+  games_requested <- length(game_ids)
+  t_schedule_s <- as.numeric(difftime(Sys.time(), t_schedule0, units = "secs"))
+  cat("Using provided game_ids:", games_requested, "\n")
+} else {
+  game_ids <- resolve_game_ids_for_week(season, week)
+  games_requested <- length(game_ids)
+  t_schedule_s <- as.numeric(difftime(Sys.time(), t_schedule0, units = "secs"))
+  cat("Resolved game_ids:", games_requested, "\n")
+}
+
 
 # -------------------------
 # Load existing cumulative scoring plays
@@ -176,6 +192,40 @@ if (is.null(pbp) || nrow(pbp) == 0) {
 }
 
 pbp_rows <- nrow(pbp)
+
+infer_is_final <- function(df) {
+  # Prefer an explicit game_end column if it exists
+  if ("game_end" %in% names(df)) {
+    return(any(df$game_end == 1, na.rm = TRUE))
+  }
+
+  # Fallback: if we can see game_seconds_remaining hit 0 in 4th/OT
+  if (all(c("qtr", "game_seconds_remaining") %in% names(df))) {
+    min_gsr <- suppressWarnings(min(df$game_seconds_remaining, na.rm = TRUE))
+    max_qtr <- suppressWarnings(max(df$qtr, na.rm = TRUE))
+    if (is.finite(min_gsr) && is.finite(max_qtr)) {
+      return(min_gsr == 0 && max_qtr >= 4)
+    }
+  }
+
+  # Last fallback: unknown -> not final
+  return(FALSE)
+}
+
+pbp_watermarks <- pbp %>%
+  dplyr::group_by(game_id) %>%
+  dplyr::summarise(
+    refreshed_at = refreshed_at,
+    pbp_rows = dplyr::n(),
+    max_play_id = suppressWarnings(max(play_id, na.rm = TRUE)),
+    is_final = infer_is_final(dplyr::cur_data_all()),
+    .groups = "drop"
+  )
+
+if (!is.na(metrics_out) && metrics_out != "") {
+  write.csv(pbp_watermarks, metrics_out, row.names = FALSE)
+}
+
 
 # -------------------------
 # Derive scoring plays

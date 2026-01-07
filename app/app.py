@@ -7,17 +7,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 # -----------------------------------------------------
 
-import os
+import os  # noqa: E402
 import subprocess
 
 import pandas as pd
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import streamlit as st
+from streamlit_js_eval import streamlit_js_eval
 from dotenv import load_dotenv
 
 from src.scoring import load_player_positions, score_team_position_totals, score_events
 from src.app_io import read_csv_safe, load_playoff_game_ids, normalize_scoring_df
 from src.ingest import run_refresh
 from src.scoreboard import build_scoreboard_dataset
+from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
     section_refresh_status,
     section_refresh_log,
@@ -63,6 +67,13 @@ PLAYOFF_GAMES = CONFIG / f"playoff_game_ids_{BBB_SEASON}.csv"
 DRAFT_PICKS = CONFIG / f"draft_picks_{BBB_SEASON}.csv"
 POS_CACHE = PROCESSED / f"player_positions_{BBB_SEASON}.csv"
 
+REFRESH_LOCK = PROCESSED / ".refresh.lock"
+REFRESH_METRICS = PROCESSED / f"pbp_metrics_latest_{BBB_SEASON}.csv"
+REFRESH_STATE = PROCESSED / f"game_refresh_state_{BBB_SEASON}.csv"
+
+SCORING_PLAYS_PATH = PROCESSED / "scoring_plays.csv"
+
+DEFAULT_TZ = "America/Chicago"  # fallback if detection fails
 
 # -------------------------
 # Small helpers (cached)
@@ -76,6 +87,8 @@ def load_positions(cache_path: Path) -> pd.DataFrame:
 # -------------------------
 st.title(f"Big Burger Bet {BBB_SEASON}")
 st.caption(f"Playoff season: {BBB_SEASON}")
+
+
 
 week = st.number_input(
     "Playoff week to refresh",
@@ -95,6 +108,135 @@ st.caption(f"Playoff games listed: {len(playoff_game_ids)}")
 col_a, _ = st.columns([1, 3])
 with col_a:
     refresh_week = st.button("Refresh This Week", type="primary")
+
+def _get_user_timezone() -> str:
+    # If we have a non-default cached tz, trust it
+    cached = st.session_state.get("user_tz")
+    if cached and cached != DEFAULT_TZ:
+        return cached
+
+    tz = streamlit_js_eval(
+        js_expressions="Intl.DateTimeFormat().resolvedOptions().timeZone",
+        key="detect_tz",
+    )
+
+    tz_str = str(tz).strip() if tz else ""
+    if tz_str and tz_str.lower() != "none":
+        # Only cache when we got a real timezone from the browser
+        st.session_state["user_tz"] = tz_str
+        return tz_str
+
+    # Do NOT cache fallback; just return it
+    return DEFAULT_TZ
+
+
+
+def _format_utc_iso_to_tz(ts_utc: str | None, tz_name: str) -> str | None:
+    """
+    ts_utc is expected to be ISO-8601 UTC like '2026-01-07T02:14:05Z'.
+    Returns formatted local time: YYYY-MM-DD h:mmam/pm (no timezone suffix).
+    """
+    if not ts_utc:
+        return None
+
+    s = str(ts_utc).strip()
+    try:
+        dt_utc = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        dt_local = dt_utc.astimezone(ZoneInfo(tz_name))
+        return dt_local.strftime("%Y-%m-%d %-I:%M%p").lower()
+    except Exception:
+        return s
+
+
+def _format_timestamp(ts: str | None) -> str | None:
+    if not ts:
+        return None
+
+    s = str(ts).strip()
+
+    # Common cleanup: drop trailing timezone tokens like " UTC"
+    # and drop fractional seconds like ".123"
+    s = s.replace("T", " ").replace("Z", "").strip()
+    if "." in s:
+        s = s.split(".", 1)[0].strip()
+    if s.endswith(" UTC"):
+        s = s[:-4].strip()
+
+    # Try a couple known formats
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.strftime("%Y-%m-%d %-I:%M%p").lower()
+        except ValueError:
+            continue
+
+    # If parsing fails, return the original string so the UI still shows something
+    return str(ts)
+
+
+
+def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
+    """
+    Returns the most recent successful refresh timestamp, or None.
+    """
+    if not refresh_state_path.exists():
+        return None
+
+    try:
+        state = pd.read_csv(refresh_state_path)
+        if "last_success_at" not in state.columns or state.empty:
+            return None
+
+        return (
+            state["last_success_at"]
+            .dropna()
+            .astype(str)
+            .max()
+        )
+    except Exception:
+        return None
+
+# --- Top bar: simple refresh control (stable) ---
+
+raw_refresh_at = _get_last_refresh_at(REFRESH_STATE)
+user_tz = _get_user_timezone()
+formatted_refresh_at = _format_utc_iso_to_tz(raw_refresh_at, user_tz)
+
+sub_text = (
+    f"Last refreshed at {formatted_refresh_at}"
+    if formatted_refresh_at
+    else "Last refreshed at —"
+)
+
+left, right = st.columns([7, 3], vertical_alignment="top")
+
+with left:
+    st.title("BBB Scoreboard")
+
+with right:
+    if st.button("Refresh Scores", type="primary", key="refresh_scores"):
+        try:
+            result = refresh_playoff_games(
+                season=BBB_SEASON,
+                playoff_game_ids=playoff_game_ids,
+                cumulative_out_path=SCORING_PLAYS_PATH,
+                metrics_out_path=REFRESH_METRICS,
+                state_path=REFRESH_STATE,
+                lock_path=REFRESH_LOCK,
+                inactive_seconds=60 * 60,
+            )
+            if result.ok:
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(result.message)
+        except RefreshInProgress as e:
+            st.warning(str(e))
+
+    # Smaller text under the button
+    st.caption(sub_text)
+
+
 
 
 # -------------------------
