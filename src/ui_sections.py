@@ -88,7 +88,6 @@ def section_event_feed(
 
     # Unit-score string: "KC QB: 4 (Brianna)"
     # pts might be float; normalize to int if it looks integral
-    pts_series = view.get("pts", "")
     if "pts" in view.columns:
         pts_numeric = pd.to_numeric(view["pts"], errors="coerce")
         pts_display = pts_numeric.map(lambda x: "" if pd.isna(x) else (str(int(x)) if float(x).is_integer() else str(x)))

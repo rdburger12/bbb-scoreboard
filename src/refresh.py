@@ -54,7 +54,7 @@ class FileLock:
             self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(self._fd, f"pid={os.getpid()} time={time.time()}\n".encode("utf-8"))
         except FileExistsError as e:
-            raise RefreshInProgress(f"Refresh already in progress (lock: {self.lock_path}).") from e
+            raise RefreshInProgress("Refresh already in progress. Wait ~10 seconds then hit refresh on your browser") from e
 
     def release(self) -> None:
         try:

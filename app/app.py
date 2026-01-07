@@ -76,6 +76,84 @@ DEFAULT_TZ = "America/Chicago"  # fallback if detection fails
 def load_positions(cache_path: Path) -> pd.DataFrame:
     return load_player_positions(cache_path)
 
+st.markdown(
+    """
+    <style>
+    .bbb-toast-wrap {
+        position: fixed;
+        top: 18px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 999999;
+        pointer-events: none; /* don't block clicks */
+    }
+    .bbb-toast {
+        min-width: 360px;
+        max-width: 760px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(49, 51, 63, 0.25);
+        background: rgba(20, 20, 20, 0.92);
+        color: white;
+        font-weight: 650;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+        opacity: 0;
+        animation: bbbFadeInOut 6s ease-in-out forwards;
+        text-align: center;
+    }
+    .bbb-toast.success { background: rgba(19, 132, 70, 0.95); }
+    .bbb-toast.info    { background: rgba(30, 64, 175, 0.95); }
+    .bbb-toast.warning { background: rgba(180, 83, 9, 0.95); }
+    .bbb-toast.error   { background: rgba(185, 28, 28, 0.95); }
+
+    @keyframes bbbFadeInOut {
+        0%   { opacity: 0; transform: translateY(-8px); }
+        8%   { opacity: 1; transform: translateY(0); }
+        85%  { opacity: 1; transform: translateY(0); }
+        100% { opacity: 0; transform: translateY(-8px); }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def bbb_toast(message: str, *, level: str = "info") -> None:
+    """
+    level: info|success|warning|error
+    """
+    st.session_state["bbb_toast_n"] = st.session_state.get("bbb_toast_n", 0) + 1
+    n = st.session_state["bbb_toast_n"]
+
+    st.markdown(
+        f"""
+        <div class="bbb-toast-wrap">
+          <div class="bbb-toast {level}" id="bbb-toast-{n}">
+            {message}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_pending_toast() -> None:
+    """
+    If a toast was queued before st.rerun(), render it once on the next run.
+    """
+    pending = st.session_state.pop("bbb_pending_toast", None)
+    if not pending:
+        return
+    msg, level = pending
+    bbb_toast(msg, level=level)
+
+
+def queue_toast(message: str, *, level: str = "info") -> None:
+    """
+    Queue a toast to be shown after st.rerun().
+    """
+    st.session_state["bbb_pending_toast"] = (message, level)
+
 
 def _get_user_timezone() -> str:
     # If we have a non-default cached tz, trust it
@@ -172,8 +250,11 @@ playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
 # -------------------------
 # UI: Header + controls
 # -------------------------
+render_pending_toast()
+
 left, right = st.columns([7, 3], vertical_alignment="top")
-st.title("Big Burger Bet")
+with left:
+    st.title("Big Burger Bet")
 
 sub_text = (
     f"Last refreshed at {formatted_refresh_at}"
@@ -182,42 +263,51 @@ sub_text = (
 )
 
 with right:
+    msg_box = st.empty()  # stable place for refresh messages
+
     if st.button("Refresh Scores", type="primary", key="refresh_scores"):
-        try:
-            result = refresh_playoff_games(
-                season=BBB_SEASON,
-                playoff_game_ids=playoff_game_ids,
-                cumulative_out_path=SCORING_PLAYS_PATH,
-                metrics_out_path=REFRESH_METRICS,
-                state_path=REFRESH_STATE,
-                lock_path=REFRESH_LOCK,
-                inactive_seconds=60 * 60,
-            )
+        msg_box.empty()
 
-            # Hard failure
-            if not result.ok:
-                st.error(result.message)
-            else:
-                # Case 1: no eligible games
-                if getattr(result, "eligible_games", None) == 0:
-                    st.info("Nothing to refresh - scoreboard reflects final scores")
+        with st.spinner("Refreshing scores… may take up to 10 seconds"):
+            try:
+                result = refresh_playoff_games(
+                    season=BBB_SEASON,
+                    playoff_game_ids=playoff_game_ids,
+                    cumulative_out_path=SCORING_PLAYS_PATH,
+                    metrics_out_path=REFRESH_METRICS,
+                    state_path=REFRESH_STATE,
+                    lock_path=REFRESH_LOCK,
+                    inactive_seconds=60 * 60,
+                )
+            except RefreshInProgress as e:
+                msg_box.warning(str(e))
+                st.stop()
+            except Exception as e:
+                msg_box.error(f"Refresh failed: {e}")
+                st.stop()
 
-                # Case 2: checked games but nothing new
-                elif getattr(result, "changed", False) is False:
-                    st.info("Up to date — no new scoring plays found.")
+        # Hard failure (refresh returned ok=False)
+        if not result.ok:
+            msg_box.error(result.message)
+            st.stop()
 
-                # Case 3: updated
-                else:
-                    st.success("Scores updated")
-                    st.cache_data.clear()
-                    st.rerun()
+        # Case 1: no eligible games
+        if getattr(result, "eligible_games", None) == 0:
+            bbb_toast("Nothing to refresh - scoreboard reflects final scores", level="info")
+            # IMPORTANT: do NOT stop; allow the rest of the app to render
+        # Case 2: checked games but nothing new
+        elif getattr(result, "changed", False) is False:
+            bbb_toast("Up to date — no new scoring plays found.", level="info")
+            # IMPORTANT: do NOT stop; allow the rest of the app to render
+        # Case 3: updated
+        else:
+            queue_toast("Scores updated", level="success")
+            st.cache_data.clear()
+            st.rerun()
 
-        except RefreshInProgress as e:
-            st.warning(str(e))
 
     # Smaller text under the button
     st.caption(sub_text)
-
 
 
 # -------------------------
