@@ -23,39 +23,6 @@ def _read_with_warning(path: Path, empty_info: str) -> pd.DataFrame:
     return df
 
 
-def section_cumulative_scoring_plays(scoring_path: Path, df_scoring: pd.DataFrame | None = None, n: int = 50) -> pd.DataFrame:
-    """
-    If df_scoring is provided, it will be displayed (no file read).
-    Otherwise reads from scoring_path.
-
-    Returns the DF that was displayed.
-    """
-    st.subheader("Cumulative scoring plays (upserted)")
-
-    if df_scoring is None:
-        df_scoring = _read_with_warning(scoring_path, "No cumulative scoring file yet.")
-
-    if df_scoring is None or df_scoring.empty:
-        return pd.DataFrame()
-
-    if {"game_id", "play_id"}.issubset(df_scoring.columns):
-        unique_keys = df_scoring[["game_id", "play_id"]].drop_duplicates().shape[0]
-        st.write(f"Rows: {len(df_scoring)} | Unique keys: {unique_keys}")
-    else:
-        st.write(f"Rows: {len(df_scoring)}")
-
-    st.dataframe(df_scoring.tail(n), use_container_width=True)
-    return df_scoring
-
-
-def section_totals_table(totals: pd.DataFrame) -> None:
-    st.subheader("Cumulative Fantasy Totals (Team × Position)")
-    if totals.empty:
-        st.info("No totals in the selected scope.")
-    else:
-        st.dataframe(totals, use_container_width=True)
-
-
 def section_event_feed(events: pd.DataFrame, *, team_filter: bool = True) -> None:
     st.subheader("Scoring Plays (event feed)")
 

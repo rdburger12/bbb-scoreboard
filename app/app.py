@@ -23,7 +23,6 @@ from src.ingest import run_refresh
 from src.scoreboard import build_scoreboard_dataset
 from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
-    section_cumulative_scoring_plays,
     section_event_feed,
     section_totals_tieout,
     section_playoff_scoping_diag,
@@ -214,8 +213,6 @@ if "__read_error__" in df_scoring.columns:
     st.warning(df_scoring.loc[0, "__read_error__"])
     df_scoring = pd.DataFrame()
 df_scoring = normalize_scoring_df(df_scoring)
-
-section_cumulative_scoring_plays(SCORING, df_scoring=df_scoring, n=50)
 
 if df_scoring.empty:
     st.info("No scoring plays loaded yet (scoring_plays.csv is empty).")
