@@ -39,35 +39,6 @@ def section_event_feed(events: pd.DataFrame, *, team_filter: bool = True) -> Non
     st.dataframe(view, use_container_width=True, height=520)
 
 
-def section_totals_tieout(totals: pd.DataFrame, events: pd.DataFrame) -> None:
-    with st.expander("Diagnostics: totals tie-out", expanded=False):
-        if totals.empty or events.empty:
-            st.info("Need both totals and events to run tie-out.")
-            return
-
-        ev_totals = (
-            events.groupby(["team", "position"], as_index=False)["pts"]
-            .sum()
-            .sort_values(["team", "position"])
-            .reset_index(drop=True)
-        )
-
-        t = totals.rename(columns={"pts": "pts_totals"}).merge(
-            ev_totals.rename(columns={"pts": "pts_events"}),
-            on=["team", "position"],
-            how="outer",
-        ).fillna(0)
-
-        t["diff"] = t["pts_totals"] - t["pts_events"]
-        bad = t[t["diff"] != 0]
-
-        if bad.empty:
-            st.success("Totals match event aggregation.")
-        else:
-            st.error("Mismatch between totals and event aggregation (should never happen).")
-            st.dataframe(bad, use_container_width=True)
-
-
 def section_scoreboard_table(scoreboard: pd.DataFrame) -> None:
     st.subheader("Scoreboard (Owners × Drafted Units)")
     if scoreboard.empty:
