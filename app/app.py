@@ -24,7 +24,6 @@ from src.scoreboard import build_scoreboard_dataset
 from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
     section_event_feed,
-    section_totals_tieout,
     section_scoreboard_round_grid
 )
 
@@ -227,7 +226,6 @@ if not POS_CACHE.exists():
 
 positions = load_positions(POS_CACHE)
 
-# --- scoring ---
 totals = score_team_position_totals(
     df_scoring,
     positions,
@@ -244,7 +242,6 @@ events = score_events(
     game_ids=playoff_game_ids,
 )
 
-# --- scoreboard dataset (Phase 2) ---
 draft_df = read_csv_safe(DRAFT_PICKS)
 if "__read_error__" in draft_df.columns:
     st.warning(draft_df.loc[0, "__read_error__"])
@@ -268,5 +265,3 @@ else:
 section_scoreboard_round_grid(scoreboard)
 
 section_event_feed(events, team_filter=True)
-
-section_totals_tieout(totals, events)
