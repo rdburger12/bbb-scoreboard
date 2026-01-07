@@ -23,8 +23,6 @@ from src.ingest import run_refresh
 from src.scoreboard import build_scoreboard_dataset
 from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
-    section_refresh_status,
-    section_refresh_log,
     section_latest_scoring_plays,
     section_cumulative_scoring_plays,
     section_totals_table,
@@ -211,8 +209,6 @@ with right:
     # Smaller text under the button
     st.caption(sub_text)
 
-df_status = section_refresh_status(STATUS)
-df_log = section_refresh_log(LOG, n=20)
 df_latest = section_latest_scoring_plays(LATEST, n=50)
 
 # read + normalize scoring plays once, then display

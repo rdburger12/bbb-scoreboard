@@ -23,25 +23,6 @@ def _read_with_warning(path: Path, empty_info: str) -> pd.DataFrame:
     return df
 
 
-def section_refresh_status(status_path: Path) -> pd.DataFrame:
-    st.subheader("Refresh status (latest)")
-    df = _read_with_warning(status_path, "No refresh_status.csv yet. Click Refresh.")
-    if not df.empty and "refreshed_at" in df.columns and len(df) == 1:
-        st.caption(f"Last refresh: {df.loc[0, 'refreshed_at']}")
-        st.dataframe(df, use_container_width=True)
-    elif not df.empty:
-        st.dataframe(df, use_container_width=True)
-    return df
-
-
-def section_refresh_log(log_path: Path, n: int = 20) -> pd.DataFrame:
-    st.subheader(f"Refresh log (last {n} attempts)")
-    df = _read_with_warning(log_path, "No refresh_log.csv yet. Click Refresh.")
-    if not df.empty:
-        st.dataframe(df.tail(n), use_container_width=True)
-    return df
-
-
 def section_latest_scoring_plays(latest_path: Path, n: int = 50) -> pd.DataFrame:
     st.subheader("Latest refresh scoring plays")
     df = _read_with_warning(latest_path, "No latest file yet, or latest refresh returned 0 scoring plays.")
