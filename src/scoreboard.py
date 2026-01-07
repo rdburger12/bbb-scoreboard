@@ -1,8 +1,8 @@
 # src/scoreboard.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Iterable, Optional
+from src.domain.teams import canonicalize_team_column
 
 import pandas as pd
 
@@ -71,71 +71,50 @@ def _optional_validate_owner_roster_shape(draft_df: pd.DataFrame) -> None:
 
 def build_scoreboard_dataset(
     draft_df: pd.DataFrame,
-    totals_df: pd.DataFrame,
+    totals: pd.DataFrame,
     *,
-    season: Optional[int] = None,
+    season: int,
     validate: bool = True,
-    validate_owner_roster_shape: bool = True,
 ) -> pd.DataFrame:
-    """
-    Build the canonical scoreboard dataset by joining draft picks (immutable inventory)
-    to cumulative scoring totals by (team, position).
+    # draft_df: owner_id, owner, round, slot, team, position, season, ...
+    # totals: team, position, pts (may be empty)
 
-    Returns columns:
-        owner_id, owner, round, slot, team, position, pts, unit
-    """
-    draft_required = ["owner_id", "owner", "round", "slot", "team", "position"]
-    totals_required = ["team", "position", "pts"]
+    if draft_df.empty:
+        return pd.DataFrame(columns=[
+            "owner_id", "owner", "round", "slot", "team", "position", "pts", "unit"
+        ])
 
-    _require_columns(draft_df, draft_required, "draft_df")
-    _require_columns(totals_df, totals_required, "totals_df")
+    d = canonicalize_team_column(draft_df.copy(), "team")
 
-    d = draft_df.copy()
-    t = totals_df.copy()
+    # Make a safe totals frame even if empty/missing cols
+    if totals is None or totals.empty:
+        t = pd.DataFrame(columns=["team", "position", "pts"])
+    else:
+        t = canonicalize_team_column(totals.copy(), "team")
 
-    # Optional season filter if season column exists
-    if season is not None and "season" in d.columns:
-        d = d[d["season"] == season].copy()
+        # If totals is non-empty but missing expected columns, degrade gracefully when validate=False
+        if not validate:
+            for col in ["team", "position", "pts"]:
+                if col not in t.columns:
+                    t[col] = pd.Series(dtype="object")
 
-    # Normalize dtypes for consistent merges/sorts
-    # (owner_id and slot are often numeric but can be read as strings from CSV)
-    d["owner_id"] = pd.to_numeric(d["owner_id"], errors="raise")
-    d["round"] = pd.to_numeric(d["round"], errors="raise")
-    d["slot"] = pd.to_numeric(d["slot"], errors="raise")
+        # Standardize expected col names if needed
+        if validate:
+            t_missing = {"team", "position", "pts"} - set(t.columns)
+            if t_missing:
+                raise ValueError(f"totals missing required columns: {sorted(t_missing)}")
 
-    # Basic trimming to avoid merge mismatches from whitespace
-    d["team"] = d["team"].astype(str).str.strip()
-    d["position"] = d["position"].astype(str).str.strip().str.upper()
-    t["team"] = t["team"].astype(str).str.strip()
-    t["position"] = t["position"].astype(str).str.strip().str.upper()
+    # Left join so every draft pick remains
+    out = d.merge(t[["team", "position", "pts"]], on=["team", "position"], how="left")
 
-    if validate:
-        _assert_no_nulls(d, ["owner_id", "owner", "round", "slot", "team", "position"], "draft_df")
-        _assert_no_nulls(t, ["team", "position", "pts"], "totals_df")
-        _validate_positions(d, "position", "draft_df")
-        _validate_positions(t, "position", "totals_df")
-        _assert_unique_key(d, ["owner_id", "position"], "draft_df (owner roster key)") if validate_owner_roster_shape else None
-        _assert_unique_key(t, ["team", "position"], "totals_df (unit key)")
+    # Default missing points to 0
+    out["pts"] = pd.to_numeric(out["pts"], errors="coerce").fillna(0)
 
-        if validate_owner_roster_shape:
-            _optional_validate_owner_roster_shape(d)
+    # Derived display-only unit
+    out["unit"] = out["team"].astype(str) + " " + out["position"].astype(str)
 
-    t = _coerce_pts_numeric(t)
+    # Slot-based sorting
+    out = out.sort_values(["owner_id", "round", "slot"], kind="stable").reset_index(drop=True)
 
-    merged = d.merge(t, how="left", on=["team", "position"])
+    return out[["owner_id", "owner", "round", "slot", "team", "position", "pts", "unit"]]
 
-    # Missing totals -> 0
-    merged["pts"] = merged["pts"].fillna(0.0)
-
-    # Display-only
-    merged["unit"] = merged["team"].astype(str) + " " + merged["position"].astype(str)
-
-    # Canonical column order
-    merged = merged[
-        ["owner_id", "owner", "round", "slot", "team", "position", "pts", "unit"]
-    ].copy()
-
-    # Sorting: owners displayed by draft slot (owner_id); stable within owner by round then slot
-    merged = merged.sort_values(by=["owner_id", "round", "slot", "position"], kind="mergesort").reset_index(drop=True)
-
-    return merged

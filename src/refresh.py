@@ -1,4 +1,3 @@
-# src/refresh.py
 from __future__ import annotations
 
 import os
@@ -11,7 +10,6 @@ from typing import Iterable
 
 import pandas as pd
 
-
 @dataclass(frozen=True)
 class RefreshResult:
     ok: bool
@@ -20,6 +18,10 @@ class RefreshResult:
     games_refreshed: int = 0
     games_frozen: int = 0
 
+    # NEW: signals for UI
+    eligible_games: int = 0
+    changed: bool = False
+    new_rows: int = 0
 
 class RefreshInProgress(RuntimeError):
     pass
@@ -52,7 +54,7 @@ class FileLock:
             self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(self._fd, f"pid={os.getpid()} time={time.time()}\n".encode("utf-8"))
         except FileExistsError as e:
-            raise RefreshInProgress(f"Refresh already in progress (lock: {self.lock_path}).") from e
+            raise RefreshInProgress("Refresh already in progress. Wait ~10 seconds then hit refresh on your browser") from e
 
     def release(self) -> None:
         try:
@@ -99,6 +101,14 @@ def _read_state(state_path: Path) -> pd.DataFrame:
         )
     return pd.read_csv(state_path, dtype={"game_id": "string"})
 
+def _safe_rowcount_csv(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        return len(pd.read_csv(path))
+    except Exception:
+        return 0
+
 def _now_utc_iso() -> str:
     # Example: 2026-01-07T02:14:05Z
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -110,7 +120,6 @@ def _to_int_or_none(x) -> int | None:
         return int(x)
     except Exception:
         return None
-
 
 def _parse_utc_iso(ts: str | None) -> float | None:
     if not ts:
@@ -168,32 +177,57 @@ def refresh_playoff_games(
       - freezes games when is_final==TRUE
       - freezes games after inactive_seconds without PBP advance (max_play_id)
 
-    Assumes your R script accepts:
-      --game_ids "<comma-separated>"
-      --out <cumulative_out_path>
-      --metrics_out <metrics_out_path>
+    "changed" is determined by pbp advance (max_play_id), not by row-counting the CSV.
     """
+
     playoff_game_ids = [str(x).strip() for x in playoff_game_ids if str(x).strip()]
     games_requested = len(playoff_game_ids)
+
     if games_requested == 0:
-        return RefreshResult(ok=True, message="No playoff game_ids provided.", games_requested=0)
+        return RefreshResult(
+            ok=True,
+            message="No playoff game_ids provided.",
+            games_requested=0,
+            games_refreshed=0,
+            games_frozen=0,
+            eligible_games=0,
+            changed=False,
+            new_rows=0,
+        )
 
     with FileLock(lock_path):
         state_df = _read_state(state_path)
-        if not state_df.empty:
+        if not state_df.empty and "game_id" in state_df.columns:
             state_df["game_id"] = state_df["game_id"].astype("string")
 
+        # Baseline for "did anything advance?"
+        prev_max_by_gid: dict[str, int | None] = {}
+        if not state_df.empty and {"game_id", "last_max_play_id"}.issubset(state_df.columns):
+            for _, r in state_df.iterrows():
+                gid = str(r["game_id"])
+                prev_max_by_gid[gid] = _to_int_or_none(r.get("last_max_play_id"))
+
         to_refresh = _select_games_to_refresh(playoff_game_ids, state_df)
-        if not to_refresh:
+        eligible_games = len(to_refresh)
+
+        if eligible_games == 0:
+            games_frozen = (
+                int(state_df["is_frozen"].fillna(False).astype(bool).sum())
+                if (not state_df.empty and "is_frozen" in state_df.columns)
+                else 0
+            )
             return RefreshResult(
                 ok=True,
-                message="All playoff games are frozen; nothing to refresh.",
+                message="Nothing to refresh - scoreboard reflects final scores",
                 games_requested=games_requested,
                 games_refreshed=0,
-                games_frozen=int(state_df["is_frozen"].fillna(False).astype(bool).sum()) if not state_df.empty else 0,
+                games_frozen=games_frozen,
+                eligible_games=0,
+                changed=False,
+                new_rows=0,
             )
 
-        # Run R refresh for selected game_ids
+        # Prepare metrics output
         metrics_out_path.parent.mkdir(parents=True, exist_ok=True)
         if metrics_out_path.exists():
             metrics_out_path.unlink()
@@ -220,7 +254,16 @@ def refresh_playoff_games(
                 f"Elapsed: {dt:.1f}s\n\n"
                 f"STDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}"
             )
-            return RefreshResult(ok=False, message=msg, games_requested=games_requested, games_refreshed=0)
+            return RefreshResult(
+                ok=False,
+                message=msg,
+                games_requested=games_requested,
+                games_refreshed=0,
+                games_frozen=0,
+                eligible_games=eligible_games,
+                changed=False,
+                new_rows=0,
+            )
 
         if not metrics_out_path.exists():
             msg = (
@@ -229,10 +272,19 @@ def refresh_playoff_games(
                 f"Elapsed: {dt:.1f}s\n\n"
                 f"STDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}"
             )
-            return RefreshResult(ok=False, message=msg, games_requested=games_requested, games_refreshed=len(to_refresh))
+            return RefreshResult(
+                ok=False,
+                message=msg,
+                games_requested=games_requested,
+                games_refreshed=eligible_games,
+                games_frozen=0,
+                eligible_games=eligible_games,
+                changed=False,
+                new_rows=0,
+            )
 
         metrics = pd.read_csv(metrics_out_path, dtype={"game_id": "string"})
-        # Expect columns: game_id, pbp_rows, max_play_id, is_final, refreshed_at
+
         required = {"game_id", "max_play_id", "is_final", "refreshed_at"}
         missing = sorted(required - set(metrics.columns))
         if missing:
@@ -240,15 +292,35 @@ def refresh_playoff_games(
                 ok=False,
                 message=f"metrics_out missing columns: {missing}",
                 games_requested=games_requested,
-                games_refreshed=len(to_refresh),
+                games_refreshed=eligible_games,
+                games_frozen=0,
+                eligible_games=eligible_games,
+                changed=False,
+                new_rows=0,
             )
+
+        # Determine "changed" by PBP advance
+        advanced_any = False
+        for _, m in metrics.iterrows():
+            gid = str(m["game_id"])
+            new_max = _to_int_or_none(m["max_play_id"])
+            prev_max = prev_max_by_gid.get(gid)
+
+            if new_max is None:
+                continue
+            if prev_max is None or new_max > prev_max:
+                advanced_any = True
+                break
+
+        changed = advanced_any
+        new_rows = 0  # we no longer rely on counting CSV rows
 
         now = _now_utc_iso()
 
-        # Index existing state
+        # Ensure state has the expected columns
         state_df = state_df.copy()
         if state_df.empty:
-            state_df = _read_state(state_path)  # ensures columns exist
+            state_df = _read_state(state_path)
 
         state_df["game_id"] = state_df["game_id"].astype("string")
         idx = {gid: i for i, gid in enumerate(state_df["game_id"].tolist())}
@@ -259,25 +331,22 @@ def refresh_playoff_games(
             gid = str(m["game_id"])
             max_play_id = _to_int_or_none(m["max_play_id"])
             is_final = bool(m["is_final"]) if not pd.isna(m["is_final"]) else False
-            # Keep the raw value if you want, but do NOT use it for state timestamps.
-            raw_refreshed_at = str(m["refreshed_at"]) if not pd.isna(m["refreshed_at"]) else ""
+
             refreshed_at_utc = now
 
-
             if gid not in idx:
-                # new row
                 state_df.loc[len(state_df)] = {
-                "season": season,
-                "game_id": gid,
-                "first_seen_at": refreshed_at_utc,
-                "last_attempt_at": now,
-                "last_success_at": refreshed_at_utc,
-                "last_max_play_id": max_play_id if max_play_id is not None else None,
-                "last_new_pbp_at": refreshed_at_utc if max_play_id is not None else None,
-                "no_new_pbp_streak": 0,
-                "is_frozen": False,
-                "freeze_reason": "",
-            }
+                    "season": season,
+                    "game_id": gid,
+                    "first_seen_at": refreshed_at_utc,
+                    "last_attempt_at": now,
+                    "last_success_at": refreshed_at_utc,
+                    "last_max_play_id": max_play_id if max_play_id is not None else None,
+                    "last_new_pbp_at": refreshed_at_utc if max_play_id is not None else None,
+                    "no_new_pbp_streak": 0,
+                    "is_frozen": False,
+                    "freeze_reason": "",
+                }
                 idx[gid] = len(state_df) - 1
             else:
                 i = idx[gid]
@@ -322,8 +391,14 @@ def refresh_playoff_games(
 
         return RefreshResult(
             ok=True,
-            message=f"Refresh complete: attempted {len(to_refresh)} games in {dt:.1f}s; froze {games_frozen_now} games.",
+            message=f"Refresh complete: attempted {eligible_games} games in {dt:.1f}s; froze {games_frozen_now} games.",
             games_requested=games_requested,
-            games_refreshed=len(to_refresh),
+            games_refreshed=eligible_games,
             games_frozen=games_frozen_now,
+            eligible_games=eligible_games,
+            changed=changed,
+            new_rows=new_rows,
         )
+
+
+

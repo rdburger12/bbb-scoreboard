@@ -18,25 +18,15 @@ from streamlit_js_eval import streamlit_js_eval
 from dotenv import load_dotenv
 
 from src.scoring import load_player_positions, score_team_position_totals, score_events
+from src.domain.teams import canonicalize_team_column
 from src.app_io import read_csv_safe, load_playoff_game_ids, normalize_scoring_df
 from src.ingest import run_refresh
 from src.scoreboard import build_scoreboard_dataset
 from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
-    section_refresh_status,
-    section_refresh_log,
-    section_latest_scoring_plays,
-    section_cumulative_scoring_plays,
-    section_totals_table,
     section_event_feed,
-    section_totals_tieout,
-    section_playoff_scoping_diag,
     section_scoreboard_round_grid
 )
-
-
-
-
 
 # -------------------------
 # Global configuration
@@ -48,7 +38,6 @@ st.set_page_config(
     layout="wide",
     page_title="BBB Scoreboard",
 )
-
 
 # -------------------------
 # Paths
@@ -82,32 +71,60 @@ DEFAULT_TZ = "America/Chicago"  # fallback if detection fails
 def load_positions(cache_path: Path) -> pd.DataFrame:
     return load_player_positions(cache_path)
 
-# -------------------------
-# UI: Header + controls
-# -------------------------
-st.title(f"Big Burger Bet {BBB_SEASON}")
-st.caption(f"Playoff season: {BBB_SEASON}")
+# --- Toast + layout CSS (inject once) ---
+st.markdown(
+    """
+    <style>
+    /* Tighten overall page top padding */
+    section.main > div {
+        padding-top: 0.5rem !important;
+    }
 
+    /* Reduce space above the main title */
+    h1 {
+        margin-top: 0.25rem !important;
+        margin-bottom: 0.75rem !important;
+    }
 
+    .bbb-toast-wrap {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+    }
+    .bbb-toast {
+        width: 100%;
+        max-width: 560px;
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(49, 51, 63, 0.25);
+        background: rgba(20, 20, 20, 0.92);
+        color: white;
+        font-weight: 650;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.20);
+        opacity: 0;
+        animation: bbbFadeInOut 6s ease-in-out forwards;
+        text-align: center;
+    }
+    .bbb-toast.success { background: rgba(19, 132, 70, 0.95); }
+    .bbb-toast.info    { background: rgba(30, 64, 175, 0.95); }
+    .bbb-toast.warning { background: rgba(180, 83, 9, 0.95); }
+    .bbb-toast.error   { background: rgba(185, 28, 28, 0.95); }
 
-week = st.number_input(
-    "Playoff week to refresh",
-    value=19,
-    step=1,
-    min_value=19,
-    max_value=22,
-    help=(
-        "Used only for ingestion (schedule -> game_ids -> pbp). "
-        "Scoring scope is controlled by playoff_game_ids_*.csv."
-    ),
+    @keyframes bbbFadeInOut {
+        0%   { opacity: 0; transform: translateY(-6px); }
+        8%   { opacity: 1; transform: translateY(0); }
+        85%  { opacity: 1; transform: translateY(0); }
+        100% { opacity: 0; transform: translateY(-6px); }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
-st.caption(f"Playoff games listed: {len(playoff_game_ids)}")
+def queue_toast(message: str, *, level: str = "info") -> None:
+    st.session_state["bbb_pending_toast"] = (message, level)
 
-col_a, _ = st.columns([1, 3])
-with col_a:
-    refresh_week = st.button("Refresh This Week", type="primary")
 
 def _get_user_timezone() -> str:
     # If we have a non-default cached tz, trust it
@@ -128,7 +145,6 @@ def _get_user_timezone() -> str:
 
     # Do NOT cache fallback; just return it
     return DEFAULT_TZ
-
 
 
 def _format_utc_iso_to_tz(ts_utc: str | None, tz_name: str) -> str | None:
@@ -174,7 +190,6 @@ def _format_timestamp(ts: str | None) -> str | None:
     return str(ts)
 
 
-
 def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
     """
     Returns the most recent successful refresh timestamp, or None.
@@ -197,102 +212,193 @@ def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
         return None
 
 # --- Top bar: simple refresh control (stable) ---
-
 raw_refresh_at = _get_last_refresh_at(REFRESH_STATE)
 user_tz = _get_user_timezone()
 formatted_refresh_at = _format_utc_iso_to_tz(raw_refresh_at, user_tz)
 
+playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
+
+# -------------------------
+# UI: Header + controls
+# -------------------------
 sub_text = (
     f"Last refreshed at {formatted_refresh_at}"
     if formatted_refresh_at
-    else "Last refreshed at —"
+    else "Press button to populate scores"
 )
 
-left, right = st.columns([7, 3], vertical_alignment="top")
+topbar = st.container()
+with topbar:
+    left, mid, right = st.columns([4, 6, 4], vertical_alignment="center")
 
-with left:
-    st.title("BBB Scoreboard")
+    with left:
+        st.markdown(
+            "<h1 style='margin:0; padding:0; line-height:1.05;'>BBB Scoreboard</h1>",
+            unsafe_allow_html=True,
+        )
 
-with right:
-    if st.button("Refresh Scores", type="primary", key="refresh_scores"):
-        try:
-            result = refresh_playoff_games(
-                season=BBB_SEASON,
-                playoff_game_ids=playoff_game_ids,
-                cumulative_out_path=SCORING_PLAYS_PATH,
-                metrics_out_path=REFRESH_METRICS,
-                state_path=REFRESH_STATE,
-                lock_path=REFRESH_LOCK,
-                inactive_seconds=60 * 60,
+    with mid:
+        TOAST_SLOT = st.empty()
+
+        def bbb_toast(message: str, *, level: str = "info") -> None:
+            st.session_state["bbb_toast_n"] = st.session_state.get("bbb_toast_n", 0) + 1
+            n = st.session_state["bbb_toast_n"]
+
+            TOAST_SLOT.markdown(
+                f"""
+                <div class="bbb-toast-wrap">
+                  <div class="bbb-toast {level}" id="bbb-toast-{n}">
+                    {message}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            if result.ok:
-                st.cache_data.clear()
-                st.rerun()
-            else:
-                st.error(result.message)
-        except RefreshInProgress as e:
-            st.warning(str(e))
 
-    # Smaller text under the button
-    st.caption(sub_text)
+        # Render any pending toast queued before st.rerun()
+        pending = st.session_state.pop("bbb_pending_toast", None)
+        if pending:
+            msg, level = pending
+            bbb_toast(msg, level=level)
+        else:
+            # keep the slot height-neutral when empty
+            TOAST_SLOT.markdown("<div style='height:0'></div>", unsafe_allow_html=True)
 
+    with right:
+        st.markdown("<div style='padding-top:4px;'></div>", unsafe_allow_html=True)
+        # Nested columns to force right alignment
+        spacer, btn_col = st.columns([3, 2])
 
+        with btn_col:
+            if st.button("Refresh Scores", type="primary", key="refresh_scores"):
+                result = None
+
+                with st.spinner("Refreshing scores…"):
+                    try:
+                        result = refresh_playoff_games(
+                            season=BBB_SEASON,
+                            playoff_game_ids=playoff_game_ids,
+                            cumulative_out_path=SCORING_PLAYS_PATH,
+                            metrics_out_path=REFRESH_METRICS,
+                            state_path=REFRESH_STATE,
+                            lock_path=REFRESH_LOCK,
+                            inactive_seconds=60 * 60,
+                        )
+                    except RefreshInProgress:
+                        bbb_toast(
+                            "Refresh already in progress. Try again in a moment.",
+                            level="warning",
+                        )
+                        result = None
+                    except Exception as e:
+                        bbb_toast(f"Refresh failed: {e}", level="error")
+                        result = None
+
+                if result is not None:
+                    if not result.ok:
+                        bbb_toast(result.message, level="error")
+                    else:
+                        if result.eligible_games == 0:
+                            queue_toast(
+                                "Nothing to refresh - scoreboard reflects final scores",
+                                level="info",
+                            )
+                        elif result.changed is False:
+                            queue_toast(
+                                "Up to date — no new scoring plays found.",
+                                level="info",
+                            )
+                        else:
+                            queue_toast("Scores updated", level="success")
+
+                        st.cache_data.clear()
+                        st.rerun()
+
+            # Right-aligned caption under the button
+            st.markdown(
+    f"""
+    <div style='text-align:right;
+                font-size:0.85rem;
+                opacity:0.75;
+                white-space:nowrap;'>
+        {sub_text}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # -------------------------
-# Action: refresh
+# Load draft (scoreboard must render even if no scoring yet)
 # -------------------------
-if refresh_week:
-    with st.spinner(f"Refreshing week {week}..."):
-        res = run_refresh(root=ROOT, r_script=R_SCRIPT, season=BBB_SEASON, week=int(week))
+draft_df = read_csv_safe(DRAFT_PICKS)
+if "__read_error__" in draft_df.columns:
+    st.warning(draft_df.loc[0, "__read_error__"])
+    draft_df = pd.DataFrame()
 
-    if res.returncode != 0:
-        st.error("Refresh failed")
-        if res.stdout.strip():
-            st.subheader("stdout")
-            st.code(res.stdout)
-        if res.stderr.strip():
-            st.subheader("stderr")
-            st.code(res.stderr)
-        st.stop()
+# Initialize outputs (always defined)
+totals = pd.DataFrame(columns=["team", "position", "pts"])
+events = pd.DataFrame()
 
-    st.success(f"Refresh complete (week {week})")
-    if res.stdout.strip():
-        st.subheader("R output")
-        st.code(res.stdout)
-    if res.stderr.strip():
-        st.subheader("R warnings (stderr)")
-        st.code(res.stderr)
+if draft_df.empty:
+    st.warning(
+        f"No draft picks loaded from {DRAFT_PICKS.name}. "
+        "Scoreboard dataset will be unavailable."
+    )
+    scoreboard = pd.DataFrame()
+else:
+    scoreboard = pd.DataFrame()  # will be built after we decide totals/events
 
-
-df_status = section_refresh_status(STATUS)
-df_log = section_refresh_log(LOG, n=20)
-df_latest = section_latest_scoring_plays(LATEST, n=50)
-
-# read + normalize scoring plays once, then display
+# -------------------------
+# Read + normalize scoring plays
+# -------------------------
 df_scoring = read_csv_safe(SCORING)
 if "__read_error__" in df_scoring.columns:
     st.warning(df_scoring.loc[0, "__read_error__"])
     df_scoring = pd.DataFrame()
 df_scoring = normalize_scoring_df(df_scoring)
 
-section_cumulative_scoring_plays(SCORING, df_scoring=df_scoring, n=50)
-
+# If no scoring plays yet: show scoreboard (0s) + empty event feed, then stop
 if df_scoring.empty:
-    st.info("No scoring plays loaded yet (scoring_plays.csv is empty).")
+    if not draft_df.empty:
+        scoreboard = build_scoreboard_dataset(
+            draft_df,
+            totals,  # empty -> pts=0
+            season=BBB_SEASON,
+            validate=True,
+        )
+
+    section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
+# -------------------------
+# Now that we have scoring plays, ensure playoff scope + positions exist
+# -------------------------
 if not playoff_game_ids:
-    st.warning(f"No playoff game_ids found in {PLAYOFF_GAMES.name}. Add game_ids to enable playoff scoring scope.")
+    st.warning(
+        f"No playoff game_ids found in {PLAYOFF_GAMES.name}. "
+        "Add game_ids to enable playoff scoring scope."
+    )
+    if not draft_df.empty:
+        scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
+        section_scoreboard_round_grid(scoreboard)
+    section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
 if not POS_CACHE.exists():
     st.error(f"Missing {POS_CACHE.name}. Run a refresh once for season {BBB_SEASON} to generate player positions.")
+    if not draft_df.empty:
+        scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
+        section_scoreboard_round_grid(scoreboard)
+    section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
 positions = load_positions(POS_CACHE)
 
-# --- scoring ---
+
+# -------------------------
+# Compute totals + events
+# -------------------------
 totals = score_team_position_totals(
     df_scoring,
     positions,
@@ -309,37 +415,21 @@ events = score_events(
     game_ids=playoff_game_ids,
 )
 
-# --- scoreboard dataset (Phase 2) ---
-draft_df = read_csv_safe(DRAFT_PICKS)
-if "__read_error__" in draft_df.columns:
-    st.warning(draft_df.loc[0, "__read_error__"])
-    draft_df = pd.DataFrame()
+# Canonicalize team abbreviations for consistent joins/display
+events = canonicalize_team_column(events, "team")
 
-if draft_df.empty:
-    st.warning(
-        f"No draft picks loaded from {DRAFT_PICKS.name}. "
-        "Scoreboard dataset will be unavailable."
-    )
-    scoreboard = pd.DataFrame()
-else:
+# -------------------------
+# Build + render scoreboard ONCE (now with points)
+# -------------------------
+if not draft_df.empty:
     scoreboard = build_scoreboard_dataset(
         draft_df,
         totals,
         season=BBB_SEASON,
         validate=True,
     )
+    section_scoreboard_round_grid(scoreboard)
 
-# --- UI ---
-section_scoreboard_round_grid(scoreboard)
+st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-section_totals_table(totals)
-
-section_playoff_scoping_diag(
-    playoff_games_path=PLAYOFF_GAMES,
-    playoff_game_ids=playoff_game_ids,
-    df_scoring=df_scoring,
-)
-
-section_event_feed(events, team_filter=True)
-
-section_totals_tieout(totals, events)
+section_event_feed(events, draft_df=draft_df, team_filter=True)

@@ -1,156 +1,173 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable
-
 import pandas as pd
 import streamlit as st
 
-from src.app_io import read_csv_safe
 
+def section_event_feed(
+    events: pd.DataFrame,
+    draft_df: pd.DataFrame,
+    *,
+    team_filter: bool = True,  # keep param for compatibility; we'll use new filters regardless
+) -> None:
 
-def _read_with_warning(path: Path, empty_info: str) -> pd.DataFrame:
-    """
-    Read a CSV via read_csv_safe and surface parse errors as Streamlit warnings.
-    Returns an empty DF on read error.
-    """
-    df = read_csv_safe(path)
-    if "__read_error__" in df.columns:
-        st.warning(df.loc[0, "__read_error__"])
-        return pd.DataFrame()
-    if df.empty and empty_info:
-        st.info(empty_info)
-    return df
+    view = events.copy()
 
+    # -------------------------
+    # Join owner via (team, position)
+    # -------------------------
+    if {"team", "position"}.issubset(view.columns) and {"team", "position", "owner"}.issubset(draft_df.columns):
+        owners = draft_df[["team", "position", "owner"]].drop_duplicates()
+        view = view.merge(owners, on=["team", "position"], how="left")
 
-def section_refresh_status(status_path: Path) -> pd.DataFrame:
-    st.subheader("Refresh status (latest)")
-    df = _read_with_warning(status_path, "No refresh_status.csv yet. Click Refresh.")
-    if not df.empty and "refreshed_at" in df.columns and len(df) == 1:
-        st.caption(f"Last refresh: {df.loc[0, 'refreshed_at']}")
-        st.dataframe(df, use_container_width=True)
-    elif not df.empty:
-        st.dataframe(df, use_container_width=True)
-    return df
+    # -------------------------
+    # Three dropdown filters (same row)
+    # -------------------------
+    cols = st.columns(3)
 
+    # Drafter filter
+    with cols[0]:
+        if "owner" in view.columns:
+            drafters = ["(All)"] + sorted(
+                [x for x in view["owner"].dropna().unique().tolist() if x]
+            )
+            sel_drafter = st.selectbox("Drafter", drafters, index=0)
+        else:
+            sel_drafter = "(All)"
 
-def section_refresh_log(log_path: Path, n: int = 20) -> pd.DataFrame:
-    st.subheader(f"Refresh log (last {n} attempts)")
-    df = _read_with_warning(log_path, "No refresh_log.csv yet. Click Refresh.")
-    if not df.empty:
-        st.dataframe(df.tail(n), use_container_width=True)
-    return df
+    # NFL team filter
+    with cols[1]:
+        if "team" in view.columns:
+            teams = ["(All)"] + sorted(
+                [x for x in view["team"].dropna().unique().tolist() if x]
+            )
+            sel_team = st.selectbox("NFL Team", teams, index=0)
+        else:
+            sel_team = "(All)"
 
+    # Position filter
+    with cols[2]:
+        if "position" in view.columns:
+            positions = ["(All)"] + sorted(
+                [x for x in view["position"].dropna().unique().tolist() if x]
+            )
+            sel_pos = st.selectbox("Position", positions, index=0)
+        else:
+            sel_pos = "(All)"
 
-def section_latest_scoring_plays(latest_path: Path, n: int = 50) -> pd.DataFrame:
-    st.subheader("Latest refresh scoring plays")
-    df = _read_with_warning(latest_path, "No latest file yet, or latest refresh returned 0 scoring plays.")
-    if not df.empty:
-        st.write(f"Rows: {len(df)}")
-        st.dataframe(df.head(n), use_container_width=True)
-    return df
+    # Apply filters AFTER all selections are made
+    if sel_drafter != "(All)":
+        view = view[view["owner"] == sel_drafter]
 
+    if sel_team != "(All)":
+        view = view[view["team"] == sel_team]
 
-def section_cumulative_scoring_plays(scoring_path: Path, df_scoring: pd.DataFrame | None = None, n: int = 50) -> pd.DataFrame:
-    """
-    If df_scoring is provided, it will be displayed (no file read).
-    Otherwise reads from scoring_path.
-
-    Returns the DF that was displayed.
-    """
-    st.subheader("Cumulative scoring plays (upserted)")
-
-    if df_scoring is None:
-        df_scoring = _read_with_warning(scoring_path, "No cumulative scoring file yet.")
-
-    if df_scoring is None or df_scoring.empty:
-        return pd.DataFrame()
-
-    if {"game_id", "play_id"}.issubset(df_scoring.columns):
-        unique_keys = df_scoring[["game_id", "play_id"]].drop_duplicates().shape[0]
-        st.write(f"Rows: {len(df_scoring)} | Unique keys: {unique_keys}")
-    else:
-        st.write(f"Rows: {len(df_scoring)}")
-
-    st.dataframe(df_scoring.tail(n), use_container_width=True)
-    return df_scoring
-
-
-def section_totals_table(totals: pd.DataFrame) -> None:
-    st.subheader("Cumulative Fantasy Totals (Team × Position)")
-    if totals.empty:
-        st.info("No totals in the selected scope.")
-    else:
-        st.dataframe(totals, use_container_width=True)
-
-
-def section_event_feed(events: pd.DataFrame, *, team_filter: bool = True) -> None:
-    st.subheader("Scoring Plays (event feed)")
+    if sel_pos != "(All)":
+        view = view[view["position"] == sel_pos]
 
     if events.empty:
-        st.info("No scoring events in scope.")
+        return
+    elif view.empty:
+        st.info("No scoring events match the selected filters.")
         return
 
-    view = events
-    if team_filter and "team" in events.columns:
-        teams = ["(All)"] + sorted([t for t in events["team"].unique().tolist() if t])
-        sel_team = st.selectbox("Filter team", teams, index=0)
-        view = events if sel_team == "(All)" else events[events["team"] == sel_team]
+    # -------------------------
+    # Build derived display fields on the unit rows
+    # -------------------------
+    # Play description
+    view["Play Description"] = view.get("desc", "")
 
-    st.dataframe(view, use_container_width=True, height=520)
+    # Game date
+    view["Game Date"] = view.get("game_date", "")
 
-
-def section_totals_tieout(totals: pd.DataFrame, events: pd.DataFrame) -> None:
-    with st.expander("Diagnostics: totals tie-out", expanded=False):
-        if totals.empty or events.empty:
-            st.info("Need both totals and events to run tie-out.")
-            return
-
-        ev_totals = (
-            events.groupby(["team", "position"], as_index=False)["pts"]
-            .sum()
-            .sort_values(["team", "position"])
-            .reset_index(drop=True)
-        )
-
-        t = totals.rename(columns={"pts": "pts_totals"}).merge(
-            ev_totals.rename(columns={"pts": "pts_events"}),
-            on=["team", "position"],
-            how="outer",
-        ).fillna(0)
-
-        t["diff"] = t["pts_totals"] - t["pts_events"]
-        bad = t[t["diff"] != 0]
-
-        if bad.empty:
-            st.success("Totals match event aggregation.")
-        else:
-            st.error("Mismatch between totals and event aggregation (should never happen).")
-            st.dataframe(bad, use_container_width=True)
-
-
-def section_playoff_scoping_diag(
-    *,
-    playoff_games_path: Path,
-    playoff_game_ids: set[str],
-    df_scoring: pd.DataFrame,
-) -> None:
-    with st.expander("Diagnostics: playoff scoping", expanded=False):
-        st.write("playoff_game_ids file:", playoff_games_path)
-        st.write("playoff_game_ids count:", len(playoff_game_ids))
-        if not df_scoring.empty and "game_id" in df_scoring.columns:
-            st.write("games in scoring_plays.csv:", int(df_scoring["game_id"].nunique()))
-
-def section_scoreboard_table(scoreboard: pd.DataFrame) -> None:
-    st.subheader("Scoreboard (Owners × Drafted Units)")
-    if scoreboard.empty:
-        st.info("Scoreboard dataset not available (missing draft picks or no totals in scope).")
+    # Time: "Q3 00:43"
+    if "qtr" in view.columns and "time" in view.columns:
+        view["Time"] = "Q" + view["qtr"].astype(str) + " " + view["time"].astype(str)
     else:
-        st.dataframe(scoreboard, use_container_width=True)
+        view["Time"] = ""
+
+    # Unit-score string: "KC QB: 4 (Brianna)"
+    # pts might be float; normalize to int if it looks integral
+    if "pts" in view.columns:
+        pts_numeric = pd.to_numeric(view["pts"], errors="coerce")
+        pts_display = pts_numeric.map(lambda x: "" if pd.isna(x) else (str(int(x)) if float(x).is_integer() else str(x)))
+    else:
+        pts_display = pd.Series([""] * len(view), index=view.index)
+
+    team_series = view["team"].astype(str) if "team" in view.columns else ""
+    pos_series = view["position"].astype(str) if "position" in view.columns else ""
+    owner_series = view["owner"].fillna("").astype(str) if "owner" in view.columns else ""
+
+    view["UnitScore"] = (
+        team_series + " " + pos_series
+        + ": " + pts_display.astype(str)
+        + " (" + owner_series + ")"
+    )
+
+    # -------------------------
+    # Identify a play key so we can aggregate to one row per play
+    # Prefer game_id+play_id; fall back to a weaker key if play_id isn't present.
+    # -------------------------
+    if {"game_id", "play_id"}.issubset(view.columns):
+        view["_play_key"] = view["game_id"].astype(str) + "|" + view["play_id"].astype(str)
+    else:
+        # Fallback: may merge distinct plays if desc/time duplicates; acceptable until play_id is present
+        fallback_cols = []
+        for c in ["game_id", "game_date", "qtr", "time", "desc"]:
+            if c in view.columns:
+                fallback_cols.append(view[c].astype(str))
+        view["_play_key"] = fallback_cols[0]
+        for s in fallback_cols[1:]:
+            view["_play_key"] = view["_play_key"] + "|" + s
+
+    # -------------------------
+    # Aggregate: one row per play with Score 1 / Score 2
+    # Deterministic order: sort by team, position (and owner) within a play
+    # -------------------------
+    sort_within = [c for c in ["team", "position", "owner"] if c in view.columns]
+    if sort_within:
+        view = view.sort_values(sort_within)
+
+    def _scores_to_two(values: list[str]) -> tuple[str, str]:
+        vals = [v for v in values if v]
+        if len(vals) == 0:
+            return ("", "")
+        if len(vals) == 1:
+            return (vals[0], "")
+        return (vals[0], vals[1])
+
+    agg = (
+        view.groupby("_play_key", as_index=False)
+        .agg(
+            {
+                "Game Date": "first",
+                "Time": "first",
+                "Play Description": "first",
+                "UnitScore": lambda s: list(s),
+                # For sorting newest-first later if available
+                **({c: "first" for c in ["game_id", "play_id", "game_date"] if c in view.columns}),
+            }
+        )
+    )
+
+    scores = agg["UnitScore"].apply(_scores_to_two)
+    agg["Score 1"] = scores.apply(lambda x: x[0])
+    agg["Score 2"] = scores.apply(lambda x: x[1])
+    agg = agg.drop(columns=["UnitScore"])
+
+    # -------------------------
+    # Sort newest-first at the play level
+    # -------------------------
+    sort_cols = [c for c in ["game_date", "game_id", "play_id"] if c in agg.columns]
+    if sort_cols:
+        agg = agg.sort_values(sort_cols, ascending=False)
+
+    # Final display
+    view_df = agg[["Game Date", "Time", "Play Description", "Score 1", "Score 2"]]
+    st.dataframe(view_df, width="stretch", height=520)
+
 
 def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
-    st.subheader("Scoreboard")
-
     if scoreboard is None or scoreboard.empty:
         st.info("No scoreboard data available.")
         return
@@ -212,12 +229,12 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
         }
 
         .bbb-slot {
-            font-size: 12px;
+            font-size: 13px;
             opacity: 0.75;
         }
 
         .bbb-unit {
-            font-size: 18px;
+            font-size: 20px;
             font-weight: 750;
             line-height: 1.1;
             margin-top: 2px;
@@ -225,7 +242,7 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
         }
 
         .bbb-pts {
-            font-size: 16px;
+            font-size: 18px;
             font-weight: 800;
             text-align: right;
             margin-top: 2px;
@@ -235,7 +252,7 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
             border: 2px solid rgba(49, 51, 63, 0.35);
             border-radius: 6px;
             padding: 10px 8px;
-            font-size: 24px;
+            font-size: 28px;
             font-weight: 900;
             text-align: center;
             background: rgba(255,255,255,0.02);
