@@ -1,4 +1,3 @@
-# src/refresh.py
 from __future__ import annotations
 
 import os
@@ -11,7 +10,6 @@ from typing import Iterable
 
 import pandas as pd
 
-
 @dataclass(frozen=True)
 class RefreshResult:
     ok: bool
@@ -20,6 +18,10 @@ class RefreshResult:
     games_refreshed: int = 0
     games_frozen: int = 0
 
+    # NEW: signals for UI
+    eligible_games: int = 0
+    changed: bool = False
+    new_rows: int = 0
 
 class RefreshInProgress(RuntimeError):
     pass
@@ -99,6 +101,14 @@ def _read_state(state_path: Path) -> pd.DataFrame:
         )
     return pd.read_csv(state_path, dtype={"game_id": "string"})
 
+def _safe_rowcount_csv(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        return len(pd.read_csv(path))
+    except Exception:
+        return 0
+
 def _now_utc_iso() -> str:
     # Example: 2026-01-07T02:14:05Z
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -110,7 +120,6 @@ def _to_int_or_none(x) -> int | None:
         return int(x)
     except Exception:
         return None
-
 
 def _parse_utc_iso(ts: str | None) -> float | None:
     if not ts:
@@ -184,13 +193,18 @@ def refresh_playoff_games(
             state_df["game_id"] = state_df["game_id"].astype("string")
 
         to_refresh = _select_games_to_refresh(playoff_game_ids, state_df)
-        if not to_refresh:
+        eligible_games = len(to_refresh)
+
+        if eligible_games == 0:
             return RefreshResult(
                 ok=True,
-                message="All playoff games are frozen; nothing to refresh.",
+                message="Nothing to refresh - scoreboard reflects final scores",
                 games_requested=games_requested,
                 games_refreshed=0,
                 games_frozen=int(state_df["is_frozen"].fillna(False).astype(bool).sum()) if not state_df.empty else 0,
+                eligible_games=0,
+                changed=False,
+                new_rows=0,
             )
 
         # Run R refresh for selected game_ids
@@ -210,7 +224,12 @@ def refresh_playoff_games(
         ]
 
         t0 = time.time()
+        before_rows = _safe_rowcount_csv(cumulative_out_path)
         proc = subprocess.run(cmd, capture_output=True, text=True)
+        after_rows = _safe_rowcount_csv(cumulative_out_path)
+        new_rows = max(0, after_rows - before_rows)
+        changed = new_rows > 0
+
         dt = time.time() - t0
 
         if proc.returncode != 0:
@@ -322,8 +341,12 @@ def refresh_playoff_games(
 
         return RefreshResult(
             ok=True,
-            message=f"Refresh complete: attempted {len(to_refresh)} games in {dt:.1f}s; froze {games_frozen_now} games.",
+            message=f"Refresh complete: attempted {eligible_games} games in {dt:.1f}s; froze {games_frozen_now} games.",
             games_requested=games_requested,
-            games_refreshed=len(to_refresh),
+            games_refreshed=eligible_games,
             games_frozen=games_frozen_now,
+            eligible_games=eligible_games,
+            changed=changed,
+            new_rows=new_rows,
         )
+

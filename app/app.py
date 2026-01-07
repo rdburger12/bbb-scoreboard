@@ -193,11 +193,25 @@ with right:
                 lock_path=REFRESH_LOCK,
                 inactive_seconds=60 * 60,
             )
-            if result.ok:
-                st.cache_data.clear()
-                st.rerun()
-            else:
+
+            # Hard failure
+            if not result.ok:
                 st.error(result.message)
+            else:
+                # Case 1: no eligible games
+                if getattr(result, "eligible_games", None) == 0:
+                    st.info("Nothing to refresh - scoreboard reflects final scores")
+
+                # Case 2: checked games but nothing new
+                elif getattr(result, "changed", False) is False:
+                    st.info("Up to date — no new scoring plays found.")
+
+                # Case 3: updated
+                else:
+                    st.success("Scores updated")
+                    st.cache_data.clear()
+                    st.rerun()
+
         except RefreshInProgress as e:
             st.warning(str(e))
 
@@ -205,8 +219,9 @@ with right:
     st.caption(sub_text)
 
 
+
 # -------------------------
-# Load draft first (scoreboard must render even if no scoring yet)
+# Load draft (scoreboard must render even if no scoring yet)
 # -------------------------
 draft_df = read_csv_safe(DRAFT_PICKS)
 if "__read_error__" in draft_df.columns:
@@ -216,27 +231,18 @@ if "__read_error__" in draft_df.columns:
 # Initialize outputs (always defined)
 totals = pd.DataFrame(columns=["team", "position", "pts"])
 events = pd.DataFrame()
-scoreboard = pd.DataFrame()
 
 if draft_df.empty:
     st.warning(
         f"No draft picks loaded from {DRAFT_PICKS.name}. "
         "Scoreboard dataset will be unavailable."
     )
+    scoreboard = pd.DataFrame()
 else:
-    # Build scoreboard even if totals is empty -> pts defaults to 0
-    scoreboard = build_scoreboard_dataset(
-        draft_df,
-        totals,
-        season=BBB_SEASON,
-        validate=True,
-    )
-
-# Render scoreboard immediately (even if all zeros)
-section_scoreboard_round_grid(scoreboard)
+    scoreboard = pd.DataFrame()  # will be built after we decide totals/events
 
 # -------------------------
-# Read + normalize scoring plays (do NOT stop the app if empty)
+# Read + normalize scoring plays
 # -------------------------
 df_scoring = read_csv_safe(SCORING)
 if "__read_error__" in df_scoring.columns:
@@ -244,8 +250,17 @@ if "__read_error__" in df_scoring.columns:
     df_scoring = pd.DataFrame()
 df_scoring = normalize_scoring_df(df_scoring)
 
+# If no scoring plays yet: show scoreboard (0s) + empty event feed, then stop
 if df_scoring.empty:
-    # Events remains empty; still render the (empty) event feed
+    if not draft_df.empty:
+        scoreboard = build_scoreboard_dataset(
+            draft_df,
+            totals,  # empty -> pts=0
+            season=BBB_SEASON,
+            validate=True,
+        )
+        section_scoreboard_round_grid(scoreboard)
+
     section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
@@ -253,19 +268,28 @@ if df_scoring.empty:
 # Now that we have scoring plays, ensure playoff scope + positions exist
 # -------------------------
 if not playoff_game_ids:
-    st.warning(f"No playoff game_ids found in {PLAYOFF_GAMES.name}. Add game_ids to enable playoff scoring scope.")
+    st.warning(
+        f"No playoff game_ids found in {PLAYOFF_GAMES.name}. "
+        "Add game_ids to enable playoff scoring scope."
+    )
+    if not draft_df.empty:
+        scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
+        section_scoreboard_round_grid(scoreboard)
     section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
 if not POS_CACHE.exists():
     st.error(f"Missing {POS_CACHE.name}. Run a refresh once for season {BBB_SEASON} to generate player positions.")
+    if not draft_df.empty:
+        scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
+        section_scoreboard_round_grid(scoreboard)
     section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
 positions = load_positions(POS_CACHE)
 
 # -------------------------
-# Compute totals + events, then rebuild scoreboard with real points
+# Compute totals + events
 # -------------------------
 totals = score_team_position_totals(
     df_scoring,
@@ -286,7 +310,9 @@ events = score_events(
 # Canonicalize team abbreviations for consistent joins/display
 events = canonicalize_team_column(events, "team")
 
-# Rebuild scoreboard now that totals exist (still safe if totals ends up empty)
+# -------------------------
+# Build + render scoreboard ONCE (now with points)
+# -------------------------
 if not draft_df.empty:
     scoreboard = build_scoreboard_dataset(
         draft_df,
@@ -294,13 +320,6 @@ if not draft_df.empty:
         season=BBB_SEASON,
         validate=True,
     )
+    section_scoreboard_round_grid(scoreboard)
 
-# Re-render scoreboard (now with points)
-section_scoreboard_round_grid(scoreboard)
-
-# Event feed (will show events if any)
-section_event_feed(
-    events,
-    draft_df=draft_df,
-    team_filter=True,
-)
+section_event_feed(events, draft_df=draft_df, team_filter=True)

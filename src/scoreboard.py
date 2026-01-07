@@ -84,19 +84,14 @@ def build_scoreboard_dataset(
             "owner_id", "owner", "round", "slot", "team", "position", "pts", "unit"
         ])
 
-    d = draft_df.copy()
-
-    # Ensure required columns exist
-    needed = {"owner_id", "owner", "round", "slot", "team", "position"}
-    missing = needed - set(d.columns)
-    if validate and missing:
-        raise ValueError(f"draft_df missing required columns: {sorted(missing)}")
+    d = canonicalize_team_column(draft_df.copy(), "team")
 
     # Make a safe totals frame even if empty/missing cols
     if totals is None or totals.empty:
         t = pd.DataFrame(columns=["team", "position", "pts"])
     else:
-        t = totals.copy()
+        t = canonicalize_team_column(totals.copy(), "team")
+
         # If totals is non-empty but missing expected columns, degrade gracefully when validate=False
         if not validate:
             for col in ["team", "position", "pts"]:
