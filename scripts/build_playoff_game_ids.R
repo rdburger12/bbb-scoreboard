@@ -9,11 +9,39 @@ suppressPackageStartupMessages({
 
 dotenv::load_dot_env()
 
-season <- as.integer(Sys.getenv("BBB_SEASON"))
+# -------------------------
+# CLI args + season resolve
+# -------------------------
+args <- commandArgs(trailingOnly = TRUE)
+
+get_flag_value <- function(flag) {
+  idx <- which(args == flag)
+  if (length(idx) == 0) {
+    return(NA_character_)
+  }
+  if (idx[1] >= length(args)) {
+    return(NA_character_)
+  }
+  args[idx[1] + 1]
+}
+
+season_arg <- get_flag_value("--season")
+
+# Try CLI first, then BBB_SEASON env var
+season <- suppressWarnings(as.integer(season_arg))
+if (is.na(season)) {
+  season_env <- Sys.getenv("BBB_SEASON", unset = NA_character_)
+  season <- suppressWarnings(as.integer(season_env))
+}
 
 if (is.na(season)) {
-  stop("BBB_SEASON not set. Check .env file.")
+  stop(
+    "Season not specified.\n",
+    "Provide --season <YEAR> or set BBB_SEASON in .env"
+  )
 }
+
+cat("Building playoff_game_ids for season:", season, "\n")
 
 out_path <- file.path(
   "data",

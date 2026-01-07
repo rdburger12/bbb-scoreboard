@@ -1,66 +1,135 @@
-import sys
-import pandas as pd
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import re
 from pathlib import Path
 
-INPUT = Path("data/raw/drafts/Big Burger Bet 2024-2025.csv")
-OUTPUT = Path("data/config/draft_picks.csv")
+import pandas as pd
+from dotenv import load_dotenv
 
-if not INPUT.exists():
-    raise FileNotFoundError(f"Input file not found: {INPUT}")
+PICK_RE = re.compile(r"^[A-Za-z]{2,4}\s+(QB|RB|WR|TE|K|OTH)$")
+NUM_RE = re.compile(r"^\d+(\.0)?$")
 
-df = pd.read_csv(INPUT)
 
-# Expect exactly 14 owners
-owners = list(df.columns[:14])
-if len(owners) != 14:
-    raise ValueError(f"Expected 14 owners, found {len(owners)}")
+def is_pick_cell(x: object) -> bool:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    return bool(PICK_RE.match(str(x).strip()))
 
-# Layout assumptions (documented + validated)
-pick_rows = [1, 4, 7, 10, 13, 16]
-slot_rows = [0, 3, 6, 9, 12, 15]
 
-records = []
+def is_numeric_cell(x: object) -> bool:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return False
+    return bool(NUM_RE.match(str(x).strip()))
 
-for round_no, (pick_row, slot_row) in enumerate(zip(pick_rows, slot_rows), start=1):
-    for owner in owners:
-        cell = df.loc[pick_row, owner]
 
-        if pd.isna(cell):
-            continue
+def row_pick_score(row: pd.Series) -> int:
+    return int(sum(is_pick_cell(v) for v in row.values))
 
-        parts = str(cell).strip().split()
-        if len(parts) != 2:
-            raise ValueError(
-                f"Invalid pick format at owner='{owner}', round={round_no}: '{cell}'"
+
+def row_numeric_score(row: pd.Series) -> int:
+    return int(sum(is_numeric_cell(v) for v in row.values))
+
+
+def parse_team_pos(cell: str) -> tuple[str, str]:
+    s = str(cell).strip()
+    if not PICK_RE.match(s):
+        raise ValueError(f"Invalid pick format '{cell}' (expected 'TEAM POS' like 'BUF QB')")
+    team, pos = s.split()
+    return team.upper(), pos.upper()
+
+
+def main() -> None:
+    ROOT = Path(__file__).resolve().parents[1]  # bbb_scoreboard/
+    load_dotenv(ROOT / ".env")
+
+    parser = argparse.ArgumentParser(description="Transform BBB draft CSV into normalized draft_picks table")
+    parser.add_argument("--season", type=int, help="Season year (overrides BBB_SEASON)")
+    parser.add_argument("--in", dest="in_path", type=str, default=None, help="Optional input CSV path")
+    args = parser.parse_args()
+
+    season = args.season
+    if season is None:
+        env_season = os.getenv("BBB_SEASON")
+        season = int(env_season) if env_season else None
+    if season is None:
+        raise RuntimeError("Season not specified. Provide --season or set BBB_SEASON in .env")
+
+    RAW = ROOT / "data" / "raw" / "drafts"
+    CONFIG = ROOT / "data" / "config"
+    RAW.mkdir(parents=True, exist_ok=True)
+    CONFIG.mkdir(parents=True, exist_ok=True)
+
+    default_in = RAW / f"Big Burger Bet {season}-{season+1}.csv"
+    in_path = Path(args.in_path) if args.in_path else default_in
+    out_path = CONFIG / f"draft_picks_{season}.csv"
+
+    if not in_path.exists():
+        raise FileNotFoundError(f"Missing raw draft file: {in_path}")
+
+    df = pd.read_csv(in_path)
+    owners = df.columns.tolist()
+
+    # Detect (slot_row -> pick_row) pairs: numeric-heavy row followed by pick-heavy row.
+    pairs: list[tuple[int, int]] = []
+    for i in range(len(df) - 1):
+        if row_numeric_score(df.iloc[i]) >= 10 and row_pick_score(df.iloc[i + 1]) >= 10:
+            pairs.append((i, i + 1))
+
+    if not pairs:
+        raise RuntimeError(
+            "Could not detect slot/pick row pairs. Expected numeric row followed by pick row."
+        )
+
+    first_slot_row_idx = pairs[0][0]
+
+    records: list[dict] = []
+    for round_no, (slot_row_idx, pick_row_idx) in enumerate(pairs, start=1):
+        slot_row = df.iloc[slot_row_idx]
+        pick_row = df.iloc[pick_row_idx]
+
+        for owner in owners:
+            cell = pick_row[owner]
+            if pd.isna(cell) or str(cell).strip() == "":
+                continue
+
+            # Skip any non-pick garbage defensively (should not happen if detection worked)
+            if not is_pick_cell(cell):
+                continue
+
+            team, position = parse_team_pos(str(cell))
+
+            owner_id_raw = df.iloc[first_slot_row_idx][owner]
+            slot_raw = slot_row[owner]
+
+            if not is_numeric_cell(owner_id_raw):
+                raise ValueError(f"owner_id not numeric for owner='{owner}': {owner_id_raw}")
+            if not is_numeric_cell(slot_raw):
+                raise ValueError(f"slot not numeric for owner='{owner}', round={round_no}: {slot_raw}")
+
+            records.append(
+                {
+                    "season": season,
+                    "owner_id": int(float(str(owner_id_raw).strip())),
+                    "owner": owner,
+                    "round": round_no,
+                    "slot": int(float(str(slot_raw).strip())),
+                    "team": team,
+                    "position": position,
+                }
             )
 
-        team, position = parts
-        team = team.upper()
-        position = position.upper()
+    out = pd.DataFrame(records)
 
-        records.append({
-            "owner_id": int(df.loc[0, owner]),
-            "owner": owner,
-            "round": round_no,
-            "slot": int(df.loc[slot_row, owner]),
-            "team": team,
-            "position": position,
-        })
+    expected = len(owners) * len(pairs)
+    if len(out) != expected:
+        print(f"WARNING: expected {expected} rows (owners*rounds), got {len(out)}")
 
-draft_picks = pd.DataFrame(records)
+    out.to_csv(out_path, index=False)
+    print(f"Wrote {len(out)} rows → {out_path}")
 
-# Validation checks
-expected_rows = 14 * 6
-if len(draft_picks) != expected_rows:
-    raise ValueError(
-        f"Expected {expected_rows} picks, found {len(draft_picks)}"
-    )
 
-required_cols = {"owner_id", "owner", "round", "slot", "team", "position"}
-if not required_cols.issubset(draft_picks.columns):
-    raise ValueError(f"Missing required columns: {required_cols - set(draft_picks.columns)}")
-
-OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-draft_picks.to_csv(OUTPUT, index=False)
-
-print(f"Wrote {len(draft_picks)} draft picks → {OUTPUT}")
+if __name__ == "__main__":
+    main()

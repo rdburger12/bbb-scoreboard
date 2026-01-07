@@ -53,6 +53,7 @@ STATUS = PROCESSED / "refresh_status.csv"
 LOG = PROCESSED / "refresh_log.csv"
 
 PLAYOFF_GAMES = CONFIG / f"playoff_game_ids_{BBB_SEASON}.csv"
+DRAFT_PICKS = CONFIG / f"draft_picks_{BBB_SEASON}.csv"
 POS_CACHE = PROCESSED / f"player_positions_{BBB_SEASON}.csv"
 
 
