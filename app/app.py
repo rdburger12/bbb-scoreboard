@@ -263,12 +263,11 @@ sub_text = (
 )
 
 with right:
-    msg_box = st.empty()  # stable place for refresh messages
-
     if st.button("Refresh Scores", type="primary", key="refresh_scores"):
-        msg_box.empty()
+        result = None
 
-        with st.spinner("Refreshing scores… may take up to 10 seconds"):
+        # Make the refresh feel responsive
+        with st.spinner("Refreshing scores…"):
             try:
                 result = refresh_playoff_games(
                     season=BBB_SEASON,
@@ -279,34 +278,39 @@ with right:
                     lock_path=REFRESH_LOCK,
                     inactive_seconds=60 * 60,
                 )
-            except RefreshInProgress as e:
-                msg_box.warning(str(e))
-                st.stop()
+            except RefreshInProgress:
+                bbb_toast(
+                    "Refresh already in progress. Try again in a moment.",
+                    level="warning",
+                )
+                result = None
             except Exception as e:
-                msg_box.error(f"Refresh failed: {e}")
-                st.stop()
+                bbb_toast(f"Refresh failed: {e}", level="error")
+                result = None
 
-        # Hard failure (refresh returned ok=False)
-        if not result.ok:
-            msg_box.error(result.message)
-            st.stop()
+        # If the refresh actually ran, always rerun so cached reads can't trap us.
+        if result is not None:
+            if not result.ok:
+                bbb_toast(result.message, level="error")
+            else:
+                # Choose message
+                if getattr(result, "eligible_games", 0) == 0:
+                    queue_toast(
+                        "Nothing to refresh - scoreboard reflects final scores",
+                        level="info",
+                    )
+                elif getattr(result, "changed", False) is False:
+                    queue_toast(
+                        "Up to date — no new scoring plays found.",
+                        level="info",
+                    )
+                else:
+                    queue_toast("Scores updated", level="success")
 
-        # Case 1: no eligible games
-        if getattr(result, "eligible_games", None) == 0:
-            bbb_toast("Nothing to refresh - scoreboard reflects final scores", level="info")
-            # IMPORTANT: do NOT stop; allow the rest of the app to render
-        # Case 2: checked games but nothing new
-        elif getattr(result, "changed", False) is False:
-            bbb_toast("Up to date — no new scoring plays found.", level="info")
-            # IMPORTANT: do NOT stop; allow the rest of the app to render
-        # Case 3: updated
-        else:
-            queue_toast("Scores updated", level="success")
-            st.cache_data.clear()
-            st.rerun()
+                # Critical: reload data from disk
+                st.cache_data.clear()
+                st.rerun()
 
-
-    # Smaller text under the button
     st.caption(sub_text)
 
 
