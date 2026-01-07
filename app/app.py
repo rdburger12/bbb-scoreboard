@@ -172,9 +172,8 @@ playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
 # -------------------------
 # UI: Header + controls
 # -------------------------
-st.title("Big Burger Bet")
 left, right = st.columns([7, 3], vertical_alignment="top")
-
+st.title("Big Burger Bet")
 
 sub_text = (
     f"Last refreshed at {formatted_refresh_at}"

@@ -10,9 +10,6 @@ def section_event_feed(
     *,
     team_filter: bool = True,  # keep param for compatibility; we'll use new filters regardless
 ) -> None:
-    if events.empty:
-        st.info("No scoring plays have happened yet - just you wait!")
-        return
 
     view = events.copy()
 
@@ -68,9 +65,9 @@ def section_event_feed(
     if sel_pos != "(All)":
         view = view[view["position"] == sel_pos]
 
-
-
-    if view.empty:
+    if events.empty:
+        return
+    elif view.empty:
         st.info("No scoring events match the selected filters.")
         return
 
