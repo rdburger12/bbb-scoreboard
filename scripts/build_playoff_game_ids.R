@@ -15,8 +15,6 @@ if (is.na(season)) {
   stop("BBB_SEASON not set. Check .env file.")
 }
 
-
-season <- 2024L
 out_path <- file.path(
   "data",
   "config",
