@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from src.scoring import load_player_positions, score_team_position_totals, score_events
 from src.app_io import read_csv_safe, load_playoff_game_ids, normalize_scoring_df
 from src.ingest import run_refresh
+from src.scoreboard import build_scoreboard_dataset
 from src.ui_sections import (
     section_refresh_status,
     section_refresh_log,
@@ -26,6 +27,7 @@ from src.ui_sections import (
     section_event_feed,
     section_totals_tieout,
     section_playoff_scoping_diag,
+    section_scoreboard_round_grid
 )
 
 
@@ -37,6 +39,11 @@ from src.ui_sections import (
 # -------------------------
 load_dotenv(ROOT / ".env")
 BBB_SEASON = int(os.environ["BBB_SEASON"])
+
+st.set_page_config(
+    layout="wide",
+    page_title="BBB Scoreboard",
+)
 
 
 # -------------------------
@@ -143,6 +150,7 @@ if not POS_CACHE.exists():
 
 positions = load_positions(POS_CACHE)
 
+# --- scoring ---
 totals = score_team_position_totals(
     df_scoring,
     positions,
@@ -159,11 +167,37 @@ events = score_events(
     game_ids=playoff_game_ids,
 )
 
+# --- scoreboard dataset (Phase 2) ---
+draft_df = read_csv_safe(DRAFT_PICKS)
+if "__read_error__" in draft_df.columns:
+    st.warning(draft_df.loc[0, "__read_error__"])
+    draft_df = pd.DataFrame()
+
+if draft_df.empty:
+    st.warning(
+        f"No draft picks loaded from {DRAFT_PICKS.name}. "
+        "Scoreboard dataset will be unavailable."
+    )
+    scoreboard = pd.DataFrame()
+else:
+    scoreboard = build_scoreboard_dataset(
+        draft_df,
+        totals,
+        season=BBB_SEASON,
+        validate=True,
+    )
+
+# --- UI ---
+section_scoreboard_round_grid(scoreboard)
+
 section_totals_table(totals)
+
 section_playoff_scoping_diag(
     playoff_games_path=PLAYOFF_GAMES,
     playoff_game_ids=playoff_game_ids,
     df_scoring=df_scoring,
 )
+
 section_event_feed(events, team_filter=True)
+
 section_totals_tieout(totals, events)
