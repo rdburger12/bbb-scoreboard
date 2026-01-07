@@ -230,12 +230,12 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
         }
 
         .bbb-slot {
-            font-size: 12px;
+            font-size: 13px;
             opacity: 0.75;
         }
 
         .bbb-unit {
-            font-size: 18px;
+            font-size: 20px;
             font-weight: 750;
             line-height: 1.1;
             margin-top: 2px;
@@ -243,7 +243,7 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
         }
 
         .bbb-pts {
-            font-size: 16px;
+            font-size: 18px;
             font-weight: 800;
             text-align: right;
             margin-top: 2px;
@@ -253,7 +253,7 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
             border: 2px solid rgba(49, 51, 63, 0.35);
             border-radius: 6px;
             padding: 10px 8px;
-            font-size: 24px;
+            font-size: 28px;
             font-weight: 900;
             text-align: center;
             background: rgba(255,255,255,0.02);
