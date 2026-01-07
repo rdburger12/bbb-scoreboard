@@ -1,26 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable
-
 import pandas as pd
 import streamlit as st
-
-from src.app_io import read_csv_safe
-
-
-def _read_with_warning(path: Path, empty_info: str) -> pd.DataFrame:
-    """
-    Read a CSV via read_csv_safe and surface parse errors as Streamlit warnings.
-    Returns an empty DF on read error.
-    """
-    df = read_csv_safe(path)
-    if "__read_error__" in df.columns:
-        st.warning(df.loc[0, "__read_error__"])
-        return pd.DataFrame()
-    if df.empty and empty_info:
-        st.info(empty_info)
-    return df
 
 
 def section_event_feed(events: pd.DataFrame, *, team_filter: bool = True) -> None:
@@ -38,13 +19,6 @@ def section_event_feed(events: pd.DataFrame, *, team_filter: bool = True) -> Non
 
     st.dataframe(view, use_container_width=True, height=520)
 
-
-def section_scoreboard_table(scoreboard: pd.DataFrame) -> None:
-    st.subheader("Scoreboard (Owners × Drafted Units)")
-    if scoreboard.empty:
-        st.info("Scoreboard dataset not available (missing draft picks or no totals in scope).")
-    else:
-        st.dataframe(scoreboard, use_container_width=True)
 
 def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
     st.subheader("Scoreboard")
