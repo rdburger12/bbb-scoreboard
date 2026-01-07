@@ -23,15 +23,6 @@ def _read_with_warning(path: Path, empty_info: str) -> pd.DataFrame:
     return df
 
 
-def section_latest_scoring_plays(latest_path: Path, n: int = 50) -> pd.DataFrame:
-    st.subheader("Latest refresh scoring plays")
-    df = _read_with_warning(latest_path, "No latest file yet, or latest refresh returned 0 scoring plays.")
-    if not df.empty:
-        st.write(f"Rows: {len(df)}")
-        st.dataframe(df.head(n), use_container_width=True)
-    return df
-
-
 def section_cumulative_scoring_plays(scoring_path: Path, df_scoring: pd.DataFrame | None = None, n: int = 50) -> pd.DataFrame:
     """
     If df_scoring is provided, it will be displayed (no file read).
