@@ -82,32 +82,6 @@ DEFAULT_TZ = "America/Chicago"  # fallback if detection fails
 def load_positions(cache_path: Path) -> pd.DataFrame:
     return load_player_positions(cache_path)
 
-# -------------------------
-# UI: Header + controls
-# -------------------------
-st.title(f"Big Burger Bet {BBB_SEASON}")
-st.caption(f"Playoff season: {BBB_SEASON}")
-
-
-
-week = st.number_input(
-    "Playoff week to refresh",
-    value=19,
-    step=1,
-    min_value=19,
-    max_value=22,
-    help=(
-        "Used only for ingestion (schedule -> game_ids -> pbp). "
-        "Scoring scope is controlled by playoff_game_ids_*.csv."
-    ),
-)
-
-playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
-st.caption(f"Playoff games listed: {len(playoff_game_ids)}")
-
-col_a, _ = st.columns([1, 3])
-with col_a:
-    refresh_week = st.button("Refresh This Week", type="primary")
 
 def _get_user_timezone() -> str:
     # If we have a non-default cached tz, trust it
@@ -128,7 +102,6 @@ def _get_user_timezone() -> str:
 
     # Do NOT cache fallback; just return it
     return DEFAULT_TZ
-
 
 
 def _format_utc_iso_to_tz(ts_utc: str | None, tz_name: str) -> str | None:
@@ -174,7 +147,6 @@ def _format_timestamp(ts: str | None) -> str | None:
     return str(ts)
 
 
-
 def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
     """
     Returns the most recent successful refresh timestamp, or None.
@@ -197,21 +169,24 @@ def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
         return None
 
 # --- Top bar: simple refresh control (stable) ---
-
 raw_refresh_at = _get_last_refresh_at(REFRESH_STATE)
 user_tz = _get_user_timezone()
 formatted_refresh_at = _format_utc_iso_to_tz(raw_refresh_at, user_tz)
+
+playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
+
+# -------------------------
+# UI: Header + controls
+# -------------------------
+left, right = st.columns([7, 3], vertical_alignment="top")
+with left:
+    st.title(f"Big Burger Bet {BBB_SEASON}")
 
 sub_text = (
     f"Last refreshed at {formatted_refresh_at}"
     if formatted_refresh_at
     else "Last refreshed at —"
 )
-
-left, right = st.columns([7, 3], vertical_alignment="top")
-
-with left:
-    st.title("BBB Scoreboard")
 
 with right:
     if st.button("Refresh Scores", type="primary", key="refresh_scores"):
@@ -235,35 +210,6 @@ with right:
 
     # Smaller text under the button
     st.caption(sub_text)
-
-
-
-
-# -------------------------
-# Action: refresh
-# -------------------------
-if refresh_week:
-    with st.spinner(f"Refreshing week {week}..."):
-        res = run_refresh(root=ROOT, r_script=R_SCRIPT, season=BBB_SEASON, week=int(week))
-
-    if res.returncode != 0:
-        st.error("Refresh failed")
-        if res.stdout.strip():
-            st.subheader("stdout")
-            st.code(res.stdout)
-        if res.stderr.strip():
-            st.subheader("stderr")
-            st.code(res.stderr)
-        st.stop()
-
-    st.success(f"Refresh complete (week {week})")
-    if res.stdout.strip():
-        st.subheader("R output")
-        st.code(res.stdout)
-    if res.stderr.strip():
-        st.subheader("R warnings (stderr)")
-        st.code(res.stderr)
-
 
 df_status = section_refresh_status(STATUS)
 df_log = section_refresh_log(LOG, n=20)
