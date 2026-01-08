@@ -18,3 +18,5 @@ data/processed/
 # OS/editor noise
 .DS_Store
 .vscode/
+
+.env
