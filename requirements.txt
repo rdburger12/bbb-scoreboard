@@ -20,6 +20,7 @@ pillow==12.1.0
 protobuf==6.33.2
 pydeck==0.9.1
 python-dateutil==2.9.0.post0
+python-dotenv
 pytz==2025.2
 referencing==0.37.0
 requests==2.32.5
