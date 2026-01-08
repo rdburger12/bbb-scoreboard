@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import time
-from datetime import datetime, timezone
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+
+from src.pbp.live_pbp import fetch_live_pbp_for_game_ids, metrics_to_dataframe
+from src.pbp.refresh_pbp import refresh_pbp
+
 
 @dataclass(frozen=True)
 class RefreshResult:
@@ -18,10 +21,11 @@ class RefreshResult:
     games_refreshed: int = 0
     games_frozen: int = 0
 
-    # NEW: signals for UI
+    # signals for UI
     eligible_games: int = 0
     changed: bool = False
     new_rows: int = 0
+
 
 class RefreshInProgress(RuntimeError):
     pass
@@ -54,7 +58,9 @@ class FileLock:
             self._fd = os.open(str(self.lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(self._fd, f"pid={os.getpid()} time={time.time()}\n".encode("utf-8"))
         except FileExistsError as e:
-            raise RefreshInProgress("Refresh already in progress. Wait ~10 seconds then hit refresh on your browser") from e
+            raise RefreshInProgress(
+                "Refresh already in progress. Wait ~10 seconds then hit refresh on your browser"
+            ) from e
 
     def release(self) -> None:
         try:
@@ -101,17 +107,11 @@ def _read_state(state_path: Path) -> pd.DataFrame:
         )
     return pd.read_csv(state_path, dtype={"game_id": "string"})
 
-def _safe_rowcount_csv(path: Path) -> int:
-    if not path.exists():
-        return 0
-    try:
-        return len(pd.read_csv(path))
-    except Exception:
-        return 0
 
 def _now_utc_iso() -> str:
     # Example: 2026-01-07T02:14:05Z
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 
 def _to_int_or_none(x) -> int | None:
     try:
@@ -120,6 +120,7 @@ def _to_int_or_none(x) -> int | None:
         return int(x)
     except Exception:
         return None
+
 
 def _parse_utc_iso(ts: str | None) -> float | None:
     if not ts:
@@ -143,7 +144,6 @@ def _should_freeze_inactive(last_new_pbp_at: str | None, inactive_seconds: int) 
     return (time.time() - last_ts) >= inactive_seconds
 
 
-
 def _select_games_to_refresh(
     playoff_game_ids: list[str],
     state_df: pd.DataFrame,
@@ -163,6 +163,7 @@ def refresh_playoff_games(
     *,
     season: int,
     playoff_game_ids: Iterable[str],
+    # kept for backward compatibility with existing call sites; unused
     rscript_path: str = "Rscript",
     refresh_script_path: str = "r/refresh_pbp.R",
     cumulative_out_path: Path,
@@ -177,12 +178,11 @@ def refresh_playoff_games(
       - freezes games when is_final==TRUE
       - freezes games after inactive_seconds without PBP advance (max_play_id)
 
-    "changed" is determined by PBP advance (max_play_id) from metrics_out,
-    not by counting CSV rows.
+    "changed" is determined by pbp advance (max_play_id), not by row-counting the CSV.
 
-    Special case: If R exits cleanly but does NOT write metrics_out (common when
-    nflfastR PBP is not loaded yet for future games), treat it as an OK no-op by
-    synthesizing a minimal metrics dataframe with status=not_loaded_yet.
+    Live mode:
+      - per-game metrics are computed from live GameCenter GTD
+      - scoring plays are refreshed via src.pbp.refresh_pbp.refresh_pbp when any game has live PBP loaded
     """
 
     playoff_game_ids = [str(x).strip() for x in playoff_game_ids if str(x).strip()]
@@ -207,10 +207,7 @@ def refresh_playoff_games(
 
         # Baseline for "did anything advance?"
         prev_max_by_gid: dict[str, int | None] = {}
-        if (
-            not state_df.empty
-            and {"game_id", "last_max_play_id"}.issubset(state_df.columns)
-        ):
+        if (not state_df.empty) and {"game_id", "last_max_play_id"}.issubset(state_df.columns):
             for _, r in state_df.iterrows():
                 gid = str(r["game_id"])
                 prev_max_by_gid[gid] = _to_int_or_none(r.get("last_max_play_id"))
@@ -237,83 +234,51 @@ def refresh_playoff_games(
 
         # Prepare metrics output
         metrics_out_path.parent.mkdir(parents=True, exist_ok=True)
-        if metrics_out_path.exists():
-            metrics_out_path.unlink()
-
-        cmd = [
-            rscript_path,
-            refresh_script_path,
-            "--game_ids",
-            ",".join(to_refresh),
-            "--out",
-            str(cumulative_out_path),
-            "--metrics_out",
-            str(metrics_out_path),
-        ]
 
         t0 = time.time()
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        dt = time.time() - t0
-
-        if proc.returncode != 0:
-            msg = (
-                "Refresh failed.\n\n"
-                f"Command: {' '.join(cmd)}\n"
-                f"Elapsed: {dt:.1f}s\n\n"
-                f"STDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}"
-            )
-            return RefreshResult(
-                ok=False,
-                message=msg,
-                games_requested=games_requested,
-                games_refreshed=0,
-                games_frozen=0,
-                eligible_games=eligible_games,
-                changed=False,
-                new_rows=0,
-            )
-
         now = _now_utc_iso()
 
-        # ---- Read metrics_out OR synthesize if missing (future games not loaded yet) ----
-        if metrics_out_path.exists():
-            metrics = pd.read_csv(metrics_out_path, dtype={"game_id": "string"})
-        else:
-            # If R said "No pbp returned. Exiting." or game_ids not loaded yet, treat as clean no-op.
-            # We synthesize metrics so downstream state update logic can proceed safely.
-            stdout = (proc.stdout or "").lower()
-            stderr = (proc.stderr or "").lower()
-            likely_not_loaded = ("no pbp returned" in stdout) or ("not loaded yet" in stderr)
+        # 1) Fetch live PBP (normalized) + per-game metrics
+        pbp_df, metrics_list = fetch_live_pbp_for_game_ids(season=season, game_ids=to_refresh)
+        metrics = metrics_to_dataframe(metrics_list)
 
-            if not likely_not_loaded:
-                # Unknown reason metrics_out missing -> surface for debugging
-                msg = (
-                    "Refresh succeeded, but metrics_out was not written.\n\n"
-                    f"Command: {' '.join(cmd)}\n"
-                    f"Elapsed: {dt:.1f}s\n\n"
-                    f"STDOUT:\n{proc.stdout}\n\nSTDERR:\n{proc.stderr}"
+        # Force refreshed_at to "now" (so state uses a consistent timestamp)
+        if not metrics.empty and "refreshed_at" in metrics.columns:
+            metrics["refreshed_at"] = now
+
+        # Write metrics_out for the app/state machine
+        metrics.to_csv(metrics_out_path, index=False)
+
+        # Determine whether any live PBP is loaded for these games
+        any_loaded = (pbp_df is not None) and (not pbp_df.empty)
+
+        # 2) Only run the scoring refresh engine if any game has PBP loaded.
+        #    This avoids overwriting outputs with empties on pre-game/404.
+        if any_loaded:
+            try:
+                refresh_pbp(
+                    season=season,
+                    week=None,
+                    game_ids=to_refresh,
+                    out_path=cumulative_out_path,
+                    metrics_out_path=None,  # per-game metrics are authored here
                 )
+            except Exception as e:
+                dt = time.time() - t0
                 return RefreshResult(
                     ok=False,
-                    message=msg,
+                    message=f"Refresh failed.\n\nElapsed: {dt:.1f}s\n\n{e}",
                     games_requested=games_requested,
-                    games_refreshed=eligible_games,
+                    games_refreshed=0,
                     games_frozen=0,
                     eligible_games=eligible_games,
                     changed=False,
                     new_rows=0,
                 )
 
-            metrics = pd.DataFrame(
-                {
-                    "game_id": pd.Series(to_refresh, dtype="string"),
-                    "max_play_id": [None] * len(to_refresh),
-                    "is_final": [False] * len(to_refresh),
-                    "refreshed_at": [now] * len(to_refresh),
-                    "status": ["not_loaded_yet"] * len(to_refresh),
-                }
-            )
+        dt = time.time() - t0
 
+        # Validate metrics schema
         required = {"game_id", "max_play_id", "is_final", "refreshed_at"}
         missing = sorted(required - set(metrics.columns))
         if missing:
