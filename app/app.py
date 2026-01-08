@@ -7,7 +7,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 # -----------------------------------------------------
 
-import os  # noqa: E402
+import os 
 import subprocess
 
 import pandas as pd
@@ -369,8 +369,6 @@ if df_scoring.empty:
         )
 
     section_event_feed(events, draft_df=draft_df, team_filter=True)
-    st.stop()
-
 # -------------------------
 # Now that we have scoring plays, ensure playoff scope + positions exist
 # -------------------------
@@ -386,7 +384,7 @@ if not playoff_game_ids:
     st.stop()
 
 if not POS_CACHE.exists():
-    st.error(f"Missing {POS_CACHE.name}. Run a refresh once for season {BBB_SEASON} to generate player positions.")
+    #st.error(f"Missing {POS_CACHE.name}. Run a refresh once for season {BBB_SEASON} to generate player positions.")
     if not draft_df.empty:
         scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
         section_scoreboard_round_grid(scoreboard)

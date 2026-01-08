@@ -222,8 +222,24 @@ pbp_watermarks <- pbp %>%
     .groups = "drop"
   )
 
-if (!is.na(metrics_out) && metrics_out != "") {
-  write.csv(pbp_watermarks, metrics_out, row.names = FALSE)
+# If no pbp returned at all, write a metrics_out with requested games and exit cleanly
+if (nrow(pbp) == 0) {
+  cat("No pbp returned. Exiting.\n")
+
+  if (!is.na(metrics_out_path) && metrics_out_path != "") {
+    metrics <- data.frame(
+      game_id = game_ids,
+      pbp_rows = 0L,
+      max_play_id = NA_integer_,
+      is_final = FALSE,
+      refreshed_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+      status = "not_loaded_yet",
+      stringsAsFactors = FALSE
+    )
+    readr::write_csv(metrics, metrics_out_path)
+  }
+
+  quit(status = 0)
 }
 
 
