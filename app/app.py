@@ -8,7 +8,6 @@ if str(ROOT) not in sys.path:
 # -----------------------------------------------------
 
 import os 
-import subprocess
 
 import pandas as pd
 from datetime import datetime, timezone
@@ -42,7 +41,6 @@ st.set_page_config(
 # -------------------------
 # Paths
 # -------------------------
-R_SCRIPT = ROOT / "r" / "refresh_pbp.R"
 
 CONFIG = ROOT / "data" / "config"
 PROCESSED = ROOT / "data" / "processed"
