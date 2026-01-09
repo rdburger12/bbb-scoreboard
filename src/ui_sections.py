@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+from html import escape
 
 
 def section_event_feed(
@@ -167,7 +168,7 @@ def section_event_feed(
     st.dataframe(view_df, width="stretch", height=520)
 
 
-def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
+def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool = False) -> None:
     if scoreboard is None or scoreboard.empty:
         st.info("No scoreboard data available.")
         return
@@ -186,39 +187,180 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
         .to_dict("records")
     )
 
-    max_round = int(pd.to_numeric(scoreboard["round"], errors="coerce").max())
-
-    # Build lookup: (owner_id, round) -> row
+    # Cell lookup: (owner_id, round) -> row
     lookup: dict[tuple[int, int], dict] = {}
-    for _, r in scoreboard.iterrows():
-        key = (int(r["owner_id"]), int(r["round"]))
-        # If there are duplicates, keep the first but warn
-        if key not in lookup:
-            lookup[key] = {
-                "slot": r["slot"],
-                "unit": r["unit"],
-                "pts": r["pts"],
+    for _, row in scoreboard.iterrows():
+        try:
+            oid = int(row["owner_id"])
+            rnd = int(row["round"])
+        except Exception:
+            continue
+        lookup[(oid, rnd)] = row.to_dict()
+
+    # Totals
+    totals_map = (
+        scoreboard.groupby("owner_id", as_index=False)["pts"]
+        .sum()
+        .set_index("owner_id")["pts"]
+        .to_dict()
+    )
+
+    max_round = int(scoreboard["round"].max()) if "round" in scoreboard.columns else 0
+
+    # -------------------------
+    # Mobile view: owners as rows, rounds as columns (no headers)
+    # -------------------------
+    if is_mobile:
+        rounds = list(range(1, min(6, max_round) + 1))
+
+        # Render the mobile scoreboard as a single HTML/CSS grid so it does not
+        # collapse into stacked columns on narrow phones.
+        st.markdown(
+            """
+            <style>
+            .bbb-m-wrap {
+                width: 100%;
+                overflow-x: auto; /* allow scroll as a safety valve */
+                -webkit-overflow-scrolling: touch;
             }
 
-    # Totals per owner
-    totals = (
-        scoreboard.groupby(["owner_id", "owner"], as_index=False)["pts"]
-        .sum()
-        .rename(columns={"pts": "total_pts"})
-    )
-    totals_map = {int(r["owner_id"]): float(r["total_pts"]) for _, r in totals.iterrows()}
+            .bbb-m-grid {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                padding-bottom: 2px;
+            }
 
+            /* One owner row: owner + 6 rounds + total */
+            .bbb-m-row {
+                display: grid;
+                grid-template-columns: 70px repeat(6, minmax(44px, 1fr)) 34px;
+                gap: 4px;
+                align-items: center;
+                min-width: 350px; /* keep the row stable; overflow-x handles narrow cases */
+            }
+
+            .bbb-m-owner {
+                font-size: 13px;
+                font-weight: 750;
+                text-align: right;
+                padding-right: 4px;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                line-height: 1.0;
+            }
+
+            .bbb-m-chip {
+                border: 1px solid rgba(49, 51, 63, 0.22);
+                border-radius: 8px;
+                padding: 4px 4px 4px 4px;
+                background: rgba(255,255,255,0.02);
+                height: 52px;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                text-align: center;
+                overflow: hidden;
+            }
+
+            .bbb-m-label {
+                font-size: 11px;
+                opacity: 0.78;
+                line-height: 1.05;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                max-width: 100%;
+            }
+
+            .bbb-m-points {
+                font-size: 16px;
+                font-weight: 900;
+                line-height: 1.05;
+                margin-top: 2px;
+            }
+
+            /* Total as plain text (visually distinct, minimal width) */
+            .bbb-m-total {
+                font-size: 17px;
+                font-weight: 900;
+                text-align: right;
+                padding-right: 2px;
+                line-height: 1.0;
+                opacity: 0.95;
+            }
+
+            @media (max-width: 420px) {
+                .bbb-m-row {
+                    grid-template-columns: 62px repeat(6, minmax(40px, 1fr)) 30px;
+                    gap: 3px;
+                }
+                .bbb-m-chip { height: 50px; }
+                .bbb-m-label { font-size: 8px; }
+                .bbb-m-points { font-size: 15px; }
+                .bbb-m-total { font-size: 16px; }
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        rows_html: list[str] = []
+        for ow in owners:
+            owner_id = int(ow["owner_id"])
+            owner_name = escape(str(ow.get("owner", "")))
+
+            # round chips
+            chips: list[str] = []
+            for rnd in rounds:
+                cell = lookup.get((owner_id, rnd))
+                if cell is None:
+                    chips.append("<div class='bbb-m-chip'></div>")
+                    continue
+                unit = escape(str(cell.get("unit", "")))
+                pts = float(cell.get("pts", 0.0))
+                chips.append(
+                    f"<div class='bbb-m-chip'><div class='bbb-m-label'>{unit}</div><div class='bbb-m-points'>{pts:.0f}</div></div>"
+                )
+
+            total = float(totals_map.get(owner_id, 0.0))
+            row_html = (
+                "<div class='bbb-m-row'>"
+                f"<div class='bbb-m-owner'>{owner_name}</div>"
+                + "".join(chips)
+                + f"<div class='bbb-m-total'>{total:.0f}</div>"
+                + "</div>"
+            )
+            rows_html.append(row_html)
+
+        st.markdown(
+            "<div class='bbb-m-wrap'><div class='bbb-m-grid'>" + "".join(rows_html) + "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        return
+
+    # -------------------------
+    # Desktop view: rounds as rows, owners as columns (existing layout)
+    # -------------------------
+
+    max_round = int(scoreboard["round"].max())
+
+    # Header row with owner names
+    header_cols = st.columns([1] + [5] * len(owners), gap="small")
+    for i, ow in enumerate(owners, start=1):
+        with header_cols[i]:
+            st.markdown(
+                f"<div style='text-align: center; font-weight: 800;'>{ow['owner']}</div>",
+                unsafe_allow_html=True,
+            )
+
+    # Grid styling
     st.markdown(
         """
         <style>
-        /* === GLOBAL LAYOUT OVERRIDE (scoreboard only) === */
-        .block-container {
-            padding-left: 1.5rem;
-            padding-right: 1.5rem;
-            max-width: 100%;
-        }
-
-        /* === SCOREBOARD CELLS === */
         .bbb-cell {
             border: 1px solid rgba(49, 51, 63, 0.25);
             border-radius: 6px;
@@ -249,40 +391,17 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
         }
 
         .bbb-total {
-            border: 2px solid rgba(49, 51, 63, 0.35);
-            border-radius: 6px;
-            padding: 10px 8px;
-            font-size: 28px;
+            border: 1px solid rgba(49, 51, 63, 0.35);
+            border-radius: 8px;
+            padding: 10px 10px 9px 10px;
+            background: rgba(255,255,255,0.06);
             font-weight: 900;
-            text-align: center;
-            background: rgba(255,255,255,0.02);
-        }
-
-        .bbb-round-label {
-            font-size: 12px;
-            opacity: 0.75;
-            padding-top: 18px;
+            text-align: right;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-    # Header row: blank label column + owner headers
-    header_cols = st.columns(
-        [1] + [5] * len(owners),
-        gap="small",
-    )
-
-    with header_cols[0]:
-        st.write("")  # spacer for round labels
-    for i, ow in enumerate(owners, start=1):
-        with header_cols[i]:
-            st.markdown(
-                f"<div style='text-align: center; font-weight: 800;'>{ow['owner']}</div>",
-                unsafe_allow_html=True,
-)
-
 
     # Round rows
     for rnd in range(1, max_round + 1):
@@ -312,9 +431,8 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame) -> None:
 
     # Totals row
     tot_cols = st.columns([1] + [5] * len(owners), gap="small")
-
     for i, ow in enumerate(owners, start=1):
         owner_id = int(ow["owner_id"])
-        total = totals_map.get(owner_id, 0.0)
+        total = float(totals_map.get(owner_id, 0.0))
         with tot_cols[i]:
             st.markdown(f"<div class='bbb-total'>{total:.0f}</div>", unsafe_allow_html=True)
