@@ -84,6 +84,18 @@ st.markdown(
         margin-bottom: 0.75rem !important;
     }
 
+    /* Mobile tweaks: tighter gutters + slightly smaller title */
+    @media (max-width: 768px) {
+        .block-container {
+            padding-left: 0.6rem !important;
+            padding-right: 0.6rem !important;
+        }
+        h1 {
+            font-size: 2.1rem !important;
+            line-height: 1.05 !important;
+        }
+    }
+
     .bbb-toast-wrap {
         display: flex;
         justify-content: center;
@@ -144,6 +156,28 @@ def _get_user_timezone() -> str:
     # Do NOT cache fallback; just return it
     return DEFAULT_TZ
 
+
+
+def _get_viewport_width() -> int | None:
+    cached = st.session_state.get('viewport_width')
+    if isinstance(cached, int) and cached > 0:
+        return cached
+
+    vw = streamlit_js_eval(
+        js_expressions='window.innerWidth',
+        key='detect_viewport_width',
+    )
+
+    try:
+        vw_int = int(vw) if vw is not None else None
+    except Exception:
+        vw_int = None
+
+    if vw_int is not None and vw_int > 0:
+        st.session_state['viewport_width'] = vw_int
+        return vw_int
+
+    return None
 
 def _format_utc_iso_to_tz(ts_utc: str | None, tz_name: str) -> str | None:
     """
@@ -212,6 +246,13 @@ def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
 # --- Top bar: simple refresh control (stable) ---
 raw_refresh_at = _get_last_refresh_at(REFRESH_STATE)
 user_tz = _get_user_timezone()
+VIEWPORT_WIDTH = _get_viewport_width()
+if VIEWPORT_WIDTH is None:
+    # On first load, browser-provided width is often unavailable.
+    # Stop so Streamlit reruns once the JS value arrives.
+    st.stop()
+IS_MOBILE = VIEWPORT_WIDTH < 768
+
 formatted_refresh_at = _format_utc_iso_to_tz(raw_refresh_at, user_tz)
 
 playoff_game_ids = load_playoff_game_ids(PLAYOFF_GAMES)
@@ -366,7 +407,14 @@ if df_scoring.empty:
             validate=True,
         )
 
-    section_event_feed(events, draft_df=draft_df, team_filter=True)
+    # Render the scoreboard even when there are no scoring plays yet.
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+
+    # The play feed is desktop-only.
+    if not IS_MOBILE:
+        section_event_feed(events, draft_df=draft_df, team_filter=True)
+
+    st.stop()
 # -------------------------
 # Now that we have scoring plays, ensure playoff scope + positions exist
 # -------------------------
@@ -377,16 +425,18 @@ if not playoff_game_ids:
     )
     if not draft_df.empty:
         scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
-        section_scoreboard_round_grid(scoreboard)
-    section_event_feed(events, draft_df=draft_df, team_filter=True)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+    if not IS_MOBILE:
+        section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
 if not POS_CACHE.exists():
     #st.error(f"Missing {POS_CACHE.name}. Run a refresh once for season {BBB_SEASON} to generate player positions.")
     if not draft_df.empty:
         scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
-        section_scoreboard_round_grid(scoreboard)
-    section_event_feed(events, draft_df=draft_df, team_filter=True)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+    if not IS_MOBILE:
+        section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
 
 positions = load_positions(POS_CACHE)
@@ -424,8 +474,9 @@ if not draft_df.empty:
         season=BBB_SEASON,
         validate=True,
     )
-    section_scoreboard_round_grid(scoreboard)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
 
 st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
-section_event_feed(events, draft_df=draft_df, team_filter=True)
+if not IS_MOBILE:
+    section_event_feed(events, draft_df=draft_df, team_filter=True)
