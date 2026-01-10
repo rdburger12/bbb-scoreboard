@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
 import os 
 
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 from streamlit_js_eval import streamlit_js_eval
@@ -19,7 +19,6 @@ from dotenv import load_dotenv
 from src.scoring import load_player_positions, score_team_position_totals, score_events
 from src.domain.teams import canonicalize_team_column
 from src.app_io import read_csv_safe, load_playoff_game_ids, normalize_scoring_df
-from src.ingest import run_refresh
 from src.scoreboard import build_scoreboard_dataset
 from src.refresh import refresh_playoff_games, RefreshInProgress
 from src.ui_sections import (
