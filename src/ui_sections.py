@@ -353,7 +353,7 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool =
     for i, ow in enumerate(owners, start=1):
         with header_cols[i]:
             st.markdown(
-                f"<div style='text-align: center; font-weight: 800;'>{ow['owner']}</div>",
+                f"<div style='text-align: center; font-size: 20px; font-weight: 800;'>{ow['owner']}</div>",
                 unsafe_allow_html=True,
             )
 
@@ -396,7 +396,8 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool =
             padding: 10px 10px 9px 10px;
             background: rgba(255,255,255,0.06);
             font-weight: 900;
-            text-align: right;
+            text-align: center;
+            font-size: 24px
         }
         </style>
         """,

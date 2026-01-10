@@ -1,7 +1,7 @@
 # src/scoreboard.py
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from typing import Iterable
 from src.domain.teams import canonicalize_team_column
 
 import pandas as pd
