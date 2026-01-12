@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-from .live_pbp import fetch_live_pbp_for_game_ids
+from .nflreadpy_pbp import fetch_pbp_for_game_ids_via_nflreadpy
 from .logging import LogRow, write_log_and_status
 from .paths import get_paths
 from .positions import ensure_player_positions
@@ -65,7 +65,7 @@ def refresh_pbp(
     refreshed_at = datetime.now().isoformat(timespec="seconds")
 
     # Fetch live pbp + per-game metrics (used here only to decide whether anything loaded)
-    pbp, metrics = fetch_live_pbp_for_game_ids(season=season, game_ids=game_ids)
+    pbp, metrics = fetch_pbp_for_game_ids_via_nflreadpy(season=season, game_ids=game_ids)
     rows_in = int(len(pbp))
 
     # Determine whether *any* requested game has any pbp rows loaded

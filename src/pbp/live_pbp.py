@@ -11,6 +11,18 @@ import requests
 from .schedule import gsis_for_game_id
 
 
+REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nfl.com/",
+}
+
+
 # Use www.nfl.com because static.nfl.com does not resolve in your environment.
 _GTD_URL = "https://www.nfl.com/liveupdate/game-center/{eid}/{eid}_gtd.json"
 
@@ -66,29 +78,23 @@ def _to_bool(x: Any) -> bool:
         return False
 
 
-def fetch_gtd_json(event_id: str, timeout_s: float = 12.0, retries: int = 2, backoff_s: float = 0.8) -> Dict[str, Any]:
-    """
-    Fetch the NFL GameCenter GTD JSON for a 10-digit event id (old_game_id).
-    Returns the parsed JSON dict. 404 -> {} (not loaded yet).
-    """
-    url = _GTD_URL.format(eid=event_id)
-    last_err: Exception | None = None
+def fetch_gtd_json(event_id: str) -> dict:
+    url = f"https://www.nfl.com/liveupdate/game-center/{event_id}/{event_id}_gtd.json"
+    try:
+        r = requests.get(url, headers=REQUEST_HEADERS, timeout=15)
+    except Exception as e:
+        raise RuntimeError(f"Request failed for {url}: {e}") from e
 
-    for attempt in range(retries + 1):
-        try:
-            resp = requests.get(url, timeout=timeout_s, headers={"User-Agent": "bbb-scoreboard/1.0"})
-            if resp.status_code == 404:
-                return {}
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(backoff_s * (2**attempt))
-            else:
-                raise
+    if r.status_code == 404:
+        return {}
 
-    raise last_err  # type: ignore[misc]
+    if r.status_code != 200:
+        raise RuntimeError(f"GTD HTTP {r.status_code} for {url}: {r.text[:200]}")
+
+    try:
+        return r.json() or {}
+    except Exception as e:
+        raise RuntimeError(f"Invalid JSON from {url}: {e}. Body head: {r.text[:200]}") from e
 
 
 def _extract_game_blob(gtd: Dict[str, Any], event_id: str) -> Dict[str, Any]:
@@ -378,19 +384,34 @@ def fetch_live_pbp_for_game_ids(
 
 def metrics_to_dataframe(metrics: List[LiveGameMetrics]) -> pd.DataFrame:
     if not metrics:
-        return pd.DataFrame(columns=["game_id", "max_play_id", "is_final", "refreshed_at", "status"])
+        return pd.DataFrame(
+            columns=[
+                "game_id",
+                "event_id",
+                "pbp_rows",
+                "max_play_id",
+                "is_final",
+                "refreshed_at",
+                "status",
+                "detail",
+            ]
+        )
 
     df = pd.DataFrame(
         [
             {
                 "game_id": m.game_id,
+                "event_id": m.event_id,
+                "pbp_rows": m.pbp_rows,
                 "max_play_id": m.max_play_id,
                 "is_final": m.is_final,
                 "refreshed_at": m.refreshed_at,
                 "status": m.status,
+                "detail": m.detail,
             }
             for m in metrics
         ]
     )
     df["game_id"] = df["game_id"].astype("string")
+    df["event_id"] = df["event_id"].astype("string")
     return df
