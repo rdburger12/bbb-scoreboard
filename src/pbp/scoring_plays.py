@@ -23,6 +23,10 @@ def derive_scoring_plays(pbp: pd.DataFrame, cfg: ScoringPlaysConfig | None = Non
     This is a Python port of your R logic (derive_scoring_plays), with the same intent:
     - identify scoring plays (TD/FG/XP/2pt/Safety/Def 2pt)
     - output a stable schema for downstream upsert/processing
+
+    NOTE:
+    nflfastR-style pbp (including nflreadpy) frequently contains nullable / NA booleans.
+    This implementation ensures missing values are filled before casting to bool.
     """
     cfg = cfg or ScoringPlaysConfig()
     if pbp is None or pbp.empty:
@@ -39,6 +43,7 @@ def derive_scoring_plays(pbp: pd.DataFrame, cfg: ScoringPlaysConfig | None = Non
     extra_point_result = as_chr(col_or(pbp, "extra_point_result", [pd.NA] * n))
     two_point_conv_result = as_chr(col_or(pbp, "two_point_conv_result", [pd.NA] * n))
 
+    # These can be nullable in nflfastR pbp; as_lgl should normalize, but we still guard later.
     pass_touchdown = as_lgl(col_or(pbp, "pass_touchdown", [False] * n))
     rush_touchdown = as_lgl(col_or(pbp, "rush_touchdown", [False] * n))
 
@@ -52,10 +57,21 @@ def derive_scoring_plays(pbp: pd.DataFrame, cfg: ScoringPlaysConfig | None = Non
     is_def_two_pt = defensive_two_point_conv.fillna(0).astype("Int64") == 1
     is_safety = safety.fillna(0).astype("Int64") == 1
 
-    is_td_off = is_td & (pass_touchdown | rush_touchdown)
-    is_td_def = is_td & (~is_td_off)
+    # Ensure nullable bools do not propagate NA
+    pass_td = pass_touchdown.fillna(False).astype(bool)
+    rush_td = rush_touchdown.fillna(False).astype(bool)
 
-    is_scoring_play = is_td | is_fg | is_xp | is_2pt_off | is_safety | is_def_two_pt
+    is_td_off = is_td.fillna(False) & (pass_td | rush_td)
+    is_td_def = is_td.fillna(False) & (~is_td_off)
+
+    is_scoring_play = (
+        is_td.fillna(False)
+        | is_fg.fillna(False)
+        | is_xp.fillna(False)
+        | is_2pt_off.fillna(False)
+        | is_safety.fillna(False)
+        | is_def_two_pt.fillna(False)
+    )
 
     # Season/week fill behavior
     if "season" in pbp.columns:
@@ -80,26 +96,39 @@ def derive_scoring_plays(pbp: pd.DataFrame, cfg: ScoringPlaysConfig | None = Non
     out["extra_point_result"] = extra_point_result
     out["two_point_conv_result"] = two_point_conv_result
 
-    out["pass_touchdown"] = pass_touchdown
-    out["rush_touchdown"] = rush_touchdown
+    out["pass_touchdown"] = pass_td
+    out["rush_touchdown"] = rush_td
     out["defensive_two_point_conv"] = defensive_two_point_conv
 
-    out["is_td"] = is_td
-    out["is_fg"] = is_fg
-    out["is_xp"] = is_xp
-    out["is_2pt"] = is_2pt_off  # keep name aligned with your downstream schema
-    out["is_safety"] = is_safety
+    out["is_td"] = is_td.fillna(False)
+    out["is_fg"] = is_fg.fillna(False)
+    out["is_xp"] = is_xp.fillna(False)
+    out["is_2pt"] = is_2pt_off.fillna(False)  # keep name aligned with your downstream schema
+    out["is_safety"] = is_safety.fillna(False)
 
-    out["is_def_two_pt"] = is_def_two_pt
-    out["is_td_off"] = is_td_off
-    out["is_td_def"] = is_td_def
-    out["is_scoring_play"] = is_scoring_play
+    out["is_def_two_pt"] = is_def_two_pt.fillna(False)
+    out["is_td_off"] = is_td_off.fillna(False)
+    out["is_td_def"] = is_td_def.fillna(False)
+    out["is_scoring_play"] = is_scoring_play.fillna(False)
 
     out = out.loc[out["is_scoring_play"].fillna(False)].copy()
 
     # Helper to pull or default for schema
     def _c(name: str, default) -> pd.Series:
         return col_or(out, name, default)
+
+    def _as_bool(series_like, m: int) -> pd.Series:
+        """
+        Convert a column to a strict bool Series, treating missing as False.
+        Handles pandas nullable boolean, floats with NaN, objects, etc.
+        """
+        s = series_like
+        if not isinstance(s, pd.Series):
+            s = pd.Series(s)
+        # Align length defensively if caller passes scalar
+        if len(s) != m:
+            s = pd.Series([s.iloc[0] if len(s) else False] * m)
+        return s.fillna(False).astype(bool)
 
     m = len(out)
     if m == 0:
@@ -125,17 +154,17 @@ def derive_scoring_plays(pbp: pd.DataFrame, cfg: ScoringPlaysConfig | None = Non
             "extra_point_result": as_chr(_c("extra_point_result", [pd.NA] * m)),
             "two_point_conv_result": as_chr(_c("two_point_conv_result", [pd.NA] * m)),
             "safety": as_int(_c("safety", [pd.NA] * m)),
-            "is_td": _c("is_td", [False] * m).astype(bool),
-            "is_fg": _c("is_fg", [False] * m).astype(bool),
-            "is_xp": _c("is_xp", [False] * m).astype(bool),
-            "is_2pt": _c("is_2pt", [False] * m).astype(bool),
-            "is_safety": _c("is_safety", [False] * m).astype(bool),
-            "pass_touchdown": _c("pass_touchdown", [False] * m).astype(bool),
-            "rush_touchdown": _c("rush_touchdown", [False] * m).astype(bool),
-            "is_td_off": _c("is_td_off", [False] * m).astype(bool),
-            "is_td_def": _c("is_td_def", [False] * m).astype(bool),
+            "is_td": _as_bool(_c("is_td", [False] * m), m),
+            "is_fg": _as_bool(_c("is_fg", [False] * m), m),
+            "is_xp": _as_bool(_c("is_xp", [False] * m), m),
+            "is_2pt": _as_bool(_c("is_2pt", [False] * m), m),
+            "is_safety": _as_bool(_c("is_safety", [False] * m), m),
+            "pass_touchdown": _as_bool(_c("pass_touchdown", [False] * m), m),
+            "rush_touchdown": _as_bool(_c("rush_touchdown", [False] * m), m),
+            "is_td_off": _as_bool(_c("is_td_off", [False] * m), m),
+            "is_td_def": _as_bool(_c("is_td_def", [False] * m), m),
             "defensive_two_point_conv": as_int(_c("defensive_two_point_conv", [pd.NA] * m)),
-            "is_def_two_pt": _c("is_def_two_pt", [False] * m).astype(bool),
+            "is_def_two_pt": _as_bool(_c("is_def_two_pt", [False] * m), m),
             "play_type": as_chr(_c("play_type", [pd.NA] * m)),
             "pass": as_int(_c("pass", [pd.NA] * m)),
             "rush": as_int(_c("rush", [pd.NA] * m)),

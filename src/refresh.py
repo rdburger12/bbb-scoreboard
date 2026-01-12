@@ -170,246 +170,95 @@ def refresh_playoff_games(
     metrics_out_path: Path,
     state_path: Path,
     lock_path: Path,
-    inactive_seconds: int = 60 * 60,  # 1 hour
+    inactive_seconds: int = 60 * 60,  # 1 hour (unused in daily mode)
 ) -> RefreshResult:
     """
-    Refresh scoring plays for a subset of playoff games:
-      - skips games frozen by prior runs
-      - freezes games when is_final==TRUE
-      - freezes games after inactive_seconds without PBP advance (max_play_id)
+    Daily mode refresh (nflreadpy / nflverse PBP):
 
-    "changed" is determined by pbp advance (max_play_id), not by row-counting the CSV.
+    - Loads nflfastR-style PBP via src.pbp.refresh_pbp.refresh_pbp (which now uses nflreadpy)
+    - Derives scoring plays and upserts into cumulative scoring_plays output
+    - "changed" is determined by output row count changing (not by max_play_id advance)
 
-    Live mode:
-      - per-game metrics are computed from live GameCenter GTD
-      - scoring plays are refreshed via src.pbp.refresh_pbp.refresh_pbp when any game has live PBP loaded
+    Note: state/freeze logic is not meaningful for this daily model; it is retained only
+    to preserve the call signature used by the Streamlit app.
     """
+    import time
+    from datetime import datetime, timezone
+
+    import pandas as pd
+
+    from src.pbp.refresh_pbp import refresh_pbp
+    from src.pbp.refresh_pbp import RefreshResult as PbpRefreshResult  # for type clarity
+    from src.refresh import RefreshInProgress  # if your file defines it here; otherwise remove
 
     playoff_game_ids = [str(x).strip() for x in playoff_game_ids if str(x).strip()]
     games_requested = len(playoff_game_ids)
 
-    if games_requested == 0:
-        return RefreshResult(
-            ok=True,
-            message="No playoff game_ids provided.",
-            games_requested=0,
-            games_refreshed=0,
-            games_frozen=0,
-            eligible_games=0,
-            changed=False,
-            new_rows=0,
+    t0 = time.time()
+
+    # --- Locking (keep existing behavior) ---
+    try:
+        lock = FileLock(lock_path, stale_seconds=60 * 5)
+        lock.acquire()
+    except Exception:
+        raise RefreshInProgress()
+
+    try:
+        # Count rows before
+        old_rows_out = 0
+        if cumulative_out_path.exists():
+            try:
+                old_df = pd.read_csv(cumulative_out_path)
+                old_rows_out = int(len(old_df))
+            except Exception:
+                old_rows_out = 0
+
+        # Run the scoring refresh engine (nflreadpy-backed)
+        pbp_result = refresh_pbp(
+            season=season,
+            week=None,
+            game_ids=playoff_game_ids,
+            out_path=cumulative_out_path,
+            metrics_out_path=None,
         )
 
-    with FileLock(lock_path):
-        state_df = _read_state(state_path)
-        if not state_df.empty and "game_id" in state_df.columns:
-            state_df["game_id"] = state_df["game_id"].astype("string")
-
-        # Baseline for "did anything advance?"
-        prev_max_by_gid: dict[str, int | None] = {}
-        if (not state_df.empty) and {"game_id", "last_max_play_id"}.issubset(state_df.columns):
-            for _, r in state_df.iterrows():
-                gid = str(r["game_id"])
-                prev_max_by_gid[gid] = _to_int_or_none(r.get("last_max_play_id"))
-
-        to_refresh = _select_games_to_refresh(playoff_game_ids, state_df)
-        eligible_games = len(to_refresh)
-
-        if eligible_games == 0:
-            games_frozen = (
-                int(state_df["is_frozen"].fillna(False).astype(bool).sum())
-                if (not state_df.empty and "is_frozen" in state_df.columns)
-                else 0
-            )
-            return RefreshResult(
-                ok=True,
-                message="Nothing to refresh - scoreboard reflects final scores",
-                games_requested=games_requested,
-                games_refreshed=0,
-                games_frozen=games_frozen,
-                eligible_games=0,
-                changed=False,
-                new_rows=0,
-            )
-
-        # Prepare metrics output
-        metrics_out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        t0 = time.time()
-        now = _now_utc_iso()
-
-        # 1) Fetch live PBP (normalized) + per-game metrics
-        pbp_df, metrics_list = fetch_live_pbp_for_game_ids(season=season, game_ids=to_refresh)
-        metrics = metrics_to_dataframe(metrics_list)
-
-        # Force refreshed_at to "now" (so state uses a consistent timestamp)
-        if not metrics.empty and "refreshed_at" in metrics.columns:
-            metrics["refreshed_at"] = now
-
-        # Write metrics_out for the app/state machine
-        metrics.to_csv(metrics_out_path, index=False)
-
-        # Determine whether any live PBP is loaded for these games
-        any_loaded = (pbp_df is not None) and (not pbp_df.empty)
-
-        # 2) Only run the scoring refresh engine if any game has PBP loaded.
-        #    This avoids overwriting outputs with empties on pre-game/404.
-        if any_loaded:
-            try:
-                refresh_pbp(
-                    season=season,
-                    week=None,
-                    game_ids=to_refresh,
-                    out_path=cumulative_out_path,
-                    metrics_out_path=None,  # per-game metrics are authored here
-                )
-            except Exception as e:
-                dt = time.time() - t0
-                return RefreshResult(
-                    ok=False,
-                    message=f"Refresh failed.\n\nElapsed: {dt:.1f}s\n\n{e}",
-                    games_requested=games_requested,
-                    games_refreshed=0,
-                    games_frozen=0,
-                    eligible_games=eligible_games,
-                    changed=False,
-                    new_rows=0,
-                )
+        # Determine changed/new_rows based on output row count delta
+        rows_out = int(pbp_result.rows_out)
+        changed = rows_out != old_rows_out
+        new_rows = max(0, rows_out - old_rows_out)
 
         dt = time.time() - t0
 
-        # Validate metrics schema
-        required = {"game_id", "max_play_id", "is_final", "refreshed_at"}
-        missing = sorted(required - set(metrics.columns))
-        if missing:
-            return RefreshResult(
-                ok=False,
-                message=f"metrics_out missing columns: {missing}",
-                games_requested=games_requested,
-                games_refreshed=eligible_games,
-                games_frozen=0,
-                eligible_games=eligible_games,
-                changed=False,
-                new_rows=0,
-            )
-
-        # Determine "changed" by PBP advance
-        advanced_any = False
-        for _, row in metrics.iterrows():
-            gid = str(row["game_id"])
-            new_max = _to_int_or_none(row["max_play_id"])
-            prev_max = prev_max_by_gid.get(gid)
-
-            if new_max is None:
-                continue
-            if prev_max is None or new_max > prev_max:
-                advanced_any = True
-                break
-
-        changed = advanced_any
-        new_rows = 0
-
-        # Ensure state has expected columns
-        state_df = state_df.copy()
-        if state_df.empty:
-            state_df = _read_state(state_path)
-
-        state_df["game_id"] = state_df["game_id"].astype("string")
-        idx = {gid: i for i, gid in enumerate(state_df["game_id"].tolist())}
-
-        games_frozen_now = 0
-
-        for _, row in metrics.iterrows():
-            gid = str(row["game_id"])
-            max_play_id = _to_int_or_none(row["max_play_id"])
-            is_final = bool(row["is_final"]) if not pd.isna(row["is_final"]) else False
-
-            status = str(row.get("status", "")).strip().lower()
-            not_loaded_yet = status in {"not_loaded_yet", "not_loaded", "unavailable"}
-
-            refreshed_at_utc = now
-
-            if gid not in idx:
-                state_df.loc[len(state_df)] = {
+        # Write a lightweight metrics row (keeps your app artifacts intact)
+        metrics_out_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {
+                    "refreshed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     "season": season,
-                    "game_id": gid,
-                    "first_seen_at": refreshed_at_utc,
-                    "last_attempt_at": now,
-                    "last_success_at": refreshed_at_utc,
-                    "last_max_play_id": max_play_id if max_play_id is not None else None,
-                    "last_new_pbp_at": refreshed_at_utc if max_play_id is not None else None,
-                    "no_new_pbp_streak": 0,
-                    "is_frozen": False,
-                    "freeze_reason": "",
+                    "games_requested": games_requested,
+                    "rows_in": int(pbp_result.rows_in),
+                    "rows_scoring": int(pbp_result.rows_scoring),
+                    "rows_out": rows_out,
+                    "changed": bool(changed),
+                    "elapsed_seconds": round(dt, 3),
                 }
-                idx[gid] = len(state_df) - 1
-
-                if not_loaded_yet:
-                    # Don’t streak/freeze games that aren't loaded yet
-                    continue
-
-            i = idx[gid]
-            state_df.at[i, "season"] = season
-            state_df.at[i, "last_attempt_at"] = now
-            state_df.at[i, "last_success_at"] = refreshed_at_utc
-
-            prev_max = _to_int_or_none(state_df.at[i, "last_max_play_id"])
-            streak = _to_int_or_none(state_df.at[i, "no_new_pbp_streak"]) or 0
-
-            advanced = False
-            if max_play_id is not None and (prev_max is None or max_play_id > prev_max):
-                advanced = True
-
-            if advanced:
-                state_df.at[i, "last_max_play_id"] = max_play_id
-                state_df.at[i, "last_new_pbp_at"] = refreshed_at_utc
-                state_df.at[i, "no_new_pbp_streak"] = 0
-            elif not_loaded_yet:
-                # Do not penalize games with no pbp loaded yet
-                pass
-            else:
-                state_df.at[i, "no_new_pbp_streak"] = streak + 1
-
-            if not_loaded_yet:
-                continue
-
-            # Freeze logic
-            if not bool(state_df.at[i, "is_frozen"]):
-                if is_final:
-                    state_df.at[i, "is_frozen"] = True
-                    state_df.at[i, "freeze_reason"] = "final"
-                    games_frozen_now += 1
-                else:
-                    last_new = state_df.at[i, "last_new_pbp_at"]
-                    streak2 = _to_int_or_none(state_df.at[i, "no_new_pbp_streak"]) or 0
-                    if streak2 >= 2 and _should_freeze_inactive(
-                        last_new_pbp_at=str(last_new) if not pd.isna(last_new) else None,
-                        inactive_seconds=inactive_seconds,
-                    ):
-                        state_df.at[i, "is_frozen"] = True
-                        state_df.at[i, "freeze_reason"] = "inactive_timeout"
-                        games_frozen_now += 1
-
-        _atomic_write_csv(state_df, state_path)
-
-        # If all games are not_loaded_yet, treat as "no new plays"
-        all_not_loaded = False
-        if "status" in metrics.columns and not metrics.empty:
-            s = metrics["status"].astype(str).str.lower().fillna("")
-            all_not_loaded = bool((s == "not_loaded_yet").all())
-
-        if all_not_loaded and not changed:
-            msg = "Up to date — no play-by-play available yet."
-        else:
-            msg = f"Refresh complete: attempted {eligible_games} games in {dt:.1f}s; froze {games_frozen_now} games."
+            ]
+        ).to_csv(metrics_out_path, index=False)
 
         return RefreshResult(
             ok=True,
-            message=msg,
+            message=f"Refresh complete: processed {games_requested} games in {dt:.1f}s.",
             games_requested=games_requested,
-            games_refreshed=eligible_games,
-            games_frozen=games_frozen_now,
-            eligible_games=eligible_games,
+            games_refreshed=games_requested,
+            games_frozen=0,
+            eligible_games=games_requested,
             changed=changed,
             new_rows=new_rows,
         )
+    finally:
+        try:
+            lock.release()
+        except Exception:
+            pass
+
