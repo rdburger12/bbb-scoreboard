@@ -14,6 +14,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 from streamlit_js_eval import streamlit_js_eval
+from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
 
 from src.scoring import load_player_positions, score_team_position_totals, score_events
@@ -159,13 +160,13 @@ def _get_user_timezone() -> str:
 
 
 def _get_viewport_width() -> int | None:
-    cached = st.session_state.get('viewport_width')
-    if isinstance(cached, int) and cached > 0:
-        return cached
-
+    """
+    Re-check viewport width on each run.
+    Streamlit doesn't rerun automatically on resize, but this prevents stale caching.
+    """
     vw = streamlit_js_eval(
-        js_expressions='window.innerWidth',
-        key='detect_viewport_width',
+        js_expressions="window.innerWidth",
+        key="detect_viewport_width",
     )
 
     try:
@@ -173,11 +174,17 @@ def _get_viewport_width() -> int | None:
     except Exception:
         vw_int = None
 
+    # Cache latest good value for fallbacks
     if vw_int is not None and vw_int > 0:
-        st.session_state['viewport_width'] = vw_int
+        st.session_state["viewport_width"] = vw_int
         return vw_int
 
+    cached = st.session_state.get("viewport_width")
+    if isinstance(cached, int) and cached > 0:
+        return cached
+
     return None
+
 
 def _format_utc_iso_to_tz(ts_utc: str | None, tz_name: str) -> str | None:
     """
@@ -246,12 +253,35 @@ def _get_last_refresh_at(refresh_state_path: Path) -> str | None:
 # --- Top bar: simple refresh control (stable) ---
 raw_refresh_at = _get_last_refresh_at(REFRESH_STATE)
 user_tz = _get_user_timezone()
+def _get_viewport_width() -> int | None:
+    """
+    Re-check viewport width each run. Cache last known value only as a fallback.
+    """
+    vw = streamlit_js_eval(
+        js_expressions="window.innerWidth",
+        key="detect_viewport_width",
+    )
+
+    try:
+        vw_int = int(vw) if vw is not None else None
+    except Exception:
+        vw_int = None
+
+    if vw_int is not None and vw_int > 0:
+        st.session_state["viewport_width"] = vw_int
+        return vw_int
+
+    cached = st.session_state.get("viewport_width")
+    if isinstance(cached, int) and cached > 0:
+        return cached
+
+    return None
+
 VIEWPORT_WIDTH = _get_viewport_width()
-if VIEWPORT_WIDTH is None:
-    # On first load, browser-provided width is often unavailable.
-    # Stop so Streamlit reruns once the JS value arrives.
-    st.stop()
-IS_MOBILE = VIEWPORT_WIDTH < 768
+# Lightweight periodic rerun so viewport changes are detected automatically.
+# 2000ms is a good balance; increase if you want less frequent.
+st_autorefresh(interval=2000, key="viewport_autorefresh")
+IS_MOBILE = (VIEWPORT_WIDTH or 9999) < 768
 
 formatted_refresh_at = _format_utc_iso_to_tz(raw_refresh_at, user_tz)
 
