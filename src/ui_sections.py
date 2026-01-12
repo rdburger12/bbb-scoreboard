@@ -168,7 +168,14 @@ def section_event_feed(
     st.dataframe(view_df, width="stretch", height=520)
 
 
-def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool = False) -> None:
+def section_scoreboard_round_grid(
+    scoreboard: pd.DataFrame,
+    *,
+    is_mobile: bool = False,
+    eliminated_teams: set[str] | None = None,
+) -> None:
+    eliminated_teams = eliminated_teams or set()
+
     if scoreboard is None or scoreboard.empty:
         st.info("No scoreboard data available.")
         return
@@ -292,6 +299,10 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool =
                 opacity: 0.95;
             }
 
+            .bbb-elim {
+                opacity: 0.35;
+            }
+
             @media (max-width: 420px) {
                 .bbb-m-row {
                     grid-template-columns: 62px repeat(6, minmax(40px, 1fr)) 30px;
@@ -312,17 +323,20 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool =
             owner_id = int(ow["owner_id"])
             owner_name = escape(str(ow.get("owner", "")))
 
-            # round chips
             chips: list[str] = []
             for rnd in rounds:
                 cell = lookup.get((owner_id, rnd))
                 if cell is None:
                     chips.append("<div class='bbb-m-chip'></div>")
                     continue
+
                 unit = escape(str(cell.get("unit", "")))
                 pts = float(cell.get("pts", 0.0))
+                team = str(cell.get("team", "")).strip()
+                elim_class = " bbb-elim" if team and team in eliminated_teams else ""
+
                 chips.append(
-                    f"<div class='bbb-m-chip'><div class='bbb-m-label'>{unit}</div><div class='bbb-m-points'>{pts:.0f}</div></div>"
+                    f"<div class='bbb-m-chip{elim_class}'><div class='bbb-m-label'>{unit}</div><div class='bbb-m-points'>{pts:.0f}</div></div>"
                 )
 
             total = float(totals_map.get(owner_id, 0.0))
@@ -399,6 +413,10 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool =
             text-align: center;
             font-size: 24px
         }
+
+        .bbb-elim {
+            opacity: 0.35;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -419,9 +437,12 @@ def section_scoreboard_round_grid(scoreboard: pd.DataFrame, *, is_mobile: bool =
                     slot = int(cell["slot"])
                     unit = str(cell["unit"])
                     pts = float(cell["pts"])
+                    team = str(cell.get("team", "")).strip()
+                    elim_class = " bbb-elim" if team and team in eliminated_teams else ""
+
                     st.markdown(
                         f"""
-                        <div class="bbb-cell">
+                        <div class="bbb-cell{elim_class}">
                             <div class="bbb-slot">{slot}</div>
                             <div class="bbb-unit">{unit}</div>
                             <div class="bbb-pts">{pts:.0f}</div>

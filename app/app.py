@@ -21,6 +21,7 @@ from src.domain.teams import canonicalize_team_column
 from src.app_io import read_csv_safe, load_playoff_game_ids, normalize_scoring_df
 from src.scoreboard import build_scoreboard_dataset
 from src.refresh import refresh_playoff_games, RefreshInProgress
+from src.playoffs import compute_eliminated_teams
 from src.ui_sections import (
     section_event_feed,
     section_scoreboard_round_grid
@@ -378,6 +379,8 @@ if "__read_error__" in draft_df.columns:
 totals = pd.DataFrame(columns=["team", "position", "pts"])
 events = pd.DataFrame()
 
+eliminated = compute_eliminated_teams(season=BBB_SEASON, playoff_game_ids=playoff_game_ids)
+
 if draft_df.empty:
     st.warning(
         f"No draft picks loaded from {DRAFT_PICKS.name}. "
@@ -407,7 +410,7 @@ if df_scoring.empty:
         )
 
     # Render the scoreboard even when there are no scoring plays yet.
-    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE, eliminated_teams=eliminated)
 
     # The play feed is desktop-only.
     if not IS_MOBILE:
@@ -424,7 +427,7 @@ if not playoff_game_ids:
     )
     if not draft_df.empty:
         scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
-    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE, eliminated_teams=eliminated)
     if not IS_MOBILE:
         section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
@@ -433,7 +436,7 @@ if not POS_CACHE.exists():
     #st.error(f"Missing {POS_CACHE.name}. Run a refresh once for season {BBB_SEASON} to generate player positions.")
     if not draft_df.empty:
         scoreboard = build_scoreboard_dataset(draft_df, totals, season=BBB_SEASON, validate=True)
-    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE, eliminated_teams=eliminated)
     if not IS_MOBILE:
         section_event_feed(events, draft_df=draft_df, team_filter=True)
     st.stop()
@@ -473,7 +476,7 @@ if not draft_df.empty:
         season=BBB_SEASON,
         validate=True,
     )
-    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE)
+    section_scoreboard_round_grid(scoreboard, is_mobile=IS_MOBILE, eliminated_teams=eliminated)
 
 st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
