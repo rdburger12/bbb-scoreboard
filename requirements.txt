@@ -29,6 +29,7 @@ rpds-py==0.30.0
 six==1.17.0
 smmap==5.0.2
 streamlit==1.52.2
+streamlit_autorefresh
 streamlit-js-eval
 tenacity==9.1.2
 toml==0.10.2
